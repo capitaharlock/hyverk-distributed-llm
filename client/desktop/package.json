@@ -1,0 +1,43 @@
+{
+  "name": "hyverk",
+  "version": "0.1.0",
+  "description": "Distributed LLM inference network — desktop node",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "NODE_ENV=development electron .",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "electron-store": "^10.0.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.hyverk.node",
+    "productName": "Hyverk",
+    "files": [
+      "src/**/*",
+      "!node_modules/.cache"
+    ],
+    "extraResources": [
+      {
+        "from": "../target/release/hyverk",
+        "to": "bin/hyverk"
+      }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Development"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

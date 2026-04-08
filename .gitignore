@@ -3,7 +3,7 @@
 **/*.rs.bk
 
 # Electron
-electron/node_modules/
+client/desktop/node_modules/
 electron/dist/
 electron/out/
 

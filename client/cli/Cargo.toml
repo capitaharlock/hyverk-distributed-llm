@@ -1,0 +1,26 @@
+[package]
+name = "hyverk"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hyverk"
+path = "src/main.rs"
+
+[dependencies]
+hyverk-core = { path = "../../shared/core" }
+hyverk-coordinator = { path = "../../server/coordinator" }
+hyverk-node = { path = "../../client/node" }
+hyverk-synthesis = { path = "../../shared/synthesis" }
+hyverk-sandbox = { path = "../../server/sandbox" }
+hyverk-training = { path = "../../shared/training" }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+hyverk-inference = { path = "../../client/inference" }
+hyverk-rag = { path = "../../server/rag" }
+tokio = { workspace = true }
+tokio-util = "0.7"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { workspace = true, features = ["stream"] }
+futures-util = "0.3"
