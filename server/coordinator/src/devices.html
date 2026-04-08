@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hyverk — Devices</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0a0e14;color:#c9d1d9;min-height:100vh;font-size:13px}
+    .header{padding:0 28px;height:48px;border-bottom:1px solid #1b2028;display:flex;align-items:center;gap:14px;background:#0d1117}
+    .logo{font-size:20px;font-weight:700;color:#f0f6fc;text-decoration:none}
+    .nav-link{font-size:13px;color:#8b949e;text-decoration:none;padding:4px 12px;border:1px solid #1b2028;border-radius:6px}
+    .nav-link:hover{color:#f0f6fc;border-color:#30363d}
+    .nav-link.active{color:#58a6ff;border-color:#1f6feb}
+    .hright{margin-left:auto;font-size:12px;color:#484f58}
+    .main{padding:20px 28px}
+
+    /* Cluster status banner */
+    .cluster-banner{padding:10px 16px;border-radius:6px;margin-bottom:16px;display:flex;align-items:center;gap:12px;font-size:13px}
+    .cluster-banner.operational{background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.3);color:#3fb950}
+    .cluster-banner.forming{background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);color:#d29922}
+    .cluster-banner.no_nodes{background:rgba(139,148,158,.1);border:1px solid #1b2028;color:#8b949e}
+    .cluster-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+    .cluster-dot.operational{background:#3fb950;box-shadow:0 0 6px #3fb950}
+    .cluster-dot.forming{background:#d29922;box-shadow:0 0 6px #d29922}
+    .cluster-dot.no_nodes{background:#484f58}
+
+    /* Summary row */
+    .summary{display:flex;gap:20px;margin-bottom:16px;font-size:12px;color:#6e7681}
+    .sum-item{display:flex;align-items:center;gap:4px}
+    .sum-num{font-weight:700;color:#f0f6fc;font-size:14px}
+    .sum-num.g{color:#3fb950}.sum-num.b{color:#58a6ff}.sum-num.o{color:#d29922}
+
+    /* Device table */
+    table{width:100%;border-collapse:collapse}
+    th{text-align:left;font-size:11px;text-transform:uppercase;color:#484f58;padding:6px 10px;border-bottom:1px solid #1b2028;font-weight:600;white-space:nowrap}
+    td{padding:7px 10px;border-bottom:1px solid #0d1117;white-space:nowrap;vertical-align:middle}
+    tr:hover td{background:#111820}
+    tr.stale td{opacity:0.5}
+
+    /* Status indicators */
+    .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px;flex-shrink:0}
+    .dot.on{background:#3fb950;box-shadow:0 0 4px #3fb950}
+    .dot.off{background:#484f58}
+    .dot.warn{background:#d29922}
+    .dot.dl{background:#58a6ff;animation:pulse 1.5s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+    .tag{font-size:11px;padding:1px 8px;border-radius:4px;font-weight:600}
+    .tag.gpu{background:rgba(31,111,235,.15);color:#58a6ff}
+    .tag.cpu{background:#1b2028;color:#6e7681}
+    .tag.ready{background:rgba(63,185,80,.15);color:#3fb950}
+    .tag.downloading{background:rgba(88,166,255,.15);color:#58a6ff}
+    .tag.error{background:rgba(248,81,73,.15);color:#f85149}
+    .tag.connecting{background:rgba(210,153,34,.15);color:#d29922}
+
+    /* Progress bar */
+    .progress-wrap{width:100px;height:6px;background:#1b2028;border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle;margin-left:6px}
+    .progress-bar{height:100%;background:#58a6ff;border-radius:3px;transition:width .5s}
+    .progress-bar.done{background:#3fb950}
+
+    .layers{font-family:'SF Mono',Menlo,monospace;font-size:11px;color:#8b949e}
+    .mono{font-family:'SF Mono',Menlo,monospace;font-size:11px;color:#484f58}
+    .name{font-weight:600;color:#f0f6fc}
+    .empty{color:#484f58;text-align:center;padding:40px}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <a href="/" class="logo">Hyverk</a>
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/models" class="nav-link">Models</a>
+    <a href="/devices" class="nav-link active">Devices</a>
+    <a href="/test" class="nav-link">Test</a>
+    <span class="hright" id="uptime"></span>
+  </div>
+
+  <div class="main">
+    <div id="cluster-status" class="cluster-banner no_nodes">
+      <div class="cluster-dot no_nodes"></div>
+      <span>Loading cluster status...</span>
+    </div>
+
+    <div class="summary">
+      <div class="sum-item"><span class="sum-num g" id="s-total">0</span> nodes</div>
+      <div class="sum-item"><span class="sum-num b" id="s-gpu">0</span> GPU</div>
+      <div class="sum-item"><span class="sum-num" id="s-cpu">0</span> CPU</div>
+      <div class="sum-item"><span class="sum-num o" id="s-contrib">0</span> contributions</div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Hardware</th>
+          <th>Layers</th>
+          <th>Inference State</th>
+          <th>Tasks</th>
+          <th>Contrib</th>
+          <th>Uptime</th>
+          <th>Last Seen</th>
+          <th>Activity</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr><td colspan="11" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const API = '';
+    function fmtN(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toString()}
+    function fmtSeen(s){
+      if(s<60) return s+'s';
+      if(s<3600) return Math.floor(s/60)+'m';
+      return Math.floor(s/3600)+'h'+Math.floor((s%3600)/60)+'m';
+    }
+    function fmtUp(s){
+      const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);
+      return h>0?h+'h '+m+'m':m+'m';
+    }
+
+    async function refresh() {
+      let nodes, cluster, metrics;
+      try {
+        [nodes, cluster, metrics] = await Promise.all([
+          fetch(API+'/api/v1/nodes').then(r=>r.json()),
+          fetch(API+'/api/v1/cluster/status').then(r=>r.json()),
+          fetch(API+'/api/v1/metrics').then(r=>r.json()),
+        ]);
+      } catch { return; }
+
+      document.getElementById('uptime').textContent = 'uptime ' + fmtUp(metrics.uptime_secs);
+
+      // Cluster banner
+      const cs = cluster.status || 'no_nodes';
+      const clusterNodes = cluster.nodes || [];
+      const readyCount = clusterNodes.filter(n=>n.state==='ready').length;
+      const totalCluster = clusterNodes.length;
+      let clusterText = '';
+      if (cs === 'operational') clusterText = 'Cluster OPERATIONAL — ' + readyCount + '/' + totalCluster + ' nodes ready, full layer coverage 0-28';
+      else if (cs === 'forming') clusterText = 'Cluster FORMING — ' + readyCount + '/' + totalCluster + ' nodes ready (waiting for full layer coverage)';
+      else clusterText = 'No inference cluster';
+
+      const banner = document.getElementById('cluster-status');
+      banner.className = 'cluster-banner ' + cs;
+      banner.innerHTML = '<div class="cluster-dot '+cs+'"></div><span>'+clusterText+'</span>';
+
+      // Build cluster state map: node_name → {state, detail, layers}
+      const clusterMap = {};
+      clusterNodes.forEach(n => {
+        clusterMap[n.node_name] = n;
+      });
+
+      const list = nodes.nodes || [];
+      const gpuCount = list.filter(n=>n.has_gpu).length;
+      const cpuCount = list.length - gpuCount;
+      const totalContrib = list.reduce((s,n)=>s+(n.contributions||0), 0);
+
+      document.getElementById('s-total').textContent = list.length;
+      document.getElementById('s-gpu').textContent = gpuCount;
+      document.getElementById('s-cpu').textContent = cpuCount;
+      document.getElementById('s-contrib').textContent = fmtN(totalContrib);
+
+      if (list.length === 0) {
+        document.getElementById('tbody').innerHTML = '<tr><td colspan="11" class="empty">No devices connected</td></tr>';
+        return;
+      }
+
+      list.sort((a,b) => {
+        if (a.has_gpu !== b.has_gpu) return b.has_gpu - a.has_gpu;
+        return a.node_name.localeCompare(b.node_name);
+      });
+
+      document.getElementById('tbody').innerHTML = list.map(n => {
+        const isOnline = n.status === 'online';
+        const dotClass = isOnline ? 'on' : 'off';
+        const rowClass = isOnline ? '' : 'stale';
+        const typeTag = n.has_gpu ? '<span class="tag gpu">GPU</span>' : '<span class="tag cpu">CPU</span>';
+
+        // Inference state from cluster data
+        const ci = clusterMap[n.node_name];
+        let stateHtml = '<span class="tag connecting">not in cluster</span>';
+        let layersHtml = '—';
+
+        if (ci) {
+          layersHtml = '<span class="layers">' + ci.layer_start + '-' + ci.layer_end + '</span>';
+          if (ci.state === 'ready') {
+            stateHtml = '<span class="tag ready">ready</span>';
+          } else if (ci.state === 'downloading') {
+            stateHtml = '<span class="tag downloading">downloading</span>' +
+              '<div class="progress-wrap"><div class="progress-bar" style="width:0%"></div></div>';
+          } else if (ci.state === 'error') {
+            stateHtml = '<span class="tag error">error</span>';
+          } else {
+            stateHtml = '<span class="tag connecting">' + ci.state + '</span>';
+          }
+        }
+
+        let activity = 'Idle';
+        if (n.active_tasks > 0) activity = '<b>' + n.active_tasks + ' task(s)</b>';
+        else if (!n.has_gpu && isOnline) activity = 'Synthesis';
+
+        return '<tr class="'+rowClass+'">' +
+          '<td><span class="dot '+dotClass+'"></span></td>' +
+          '<td class="name">'+n.node_name+'</td>' +
+          '<td>'+typeTag+'</td>' +
+          '<td style="color:#6e7681">'+n.hardware+'</td>' +
+          '<td>'+layersHtml+'</td>' +
+          '<td>'+stateHtml+'</td>' +
+          '<td style="text-align:center">'+(n.active_tasks||0)+'</td>' +
+          '<td style="text-align:center;color:#3fb950">'+fmtN(n.contributions)+'</td>' +
+          '<td style="color:#6e7681">'+fmtUp(n.uptime_secs)+'</td>' +
+          '<td style="color:'+(n.last_seen_secs>30?'#d29922':'#6e7681')+'">'+fmtSeen(n.last_seen_secs)+'</td>' +
+          '<td style="color:#8b949e">'+activity+'</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

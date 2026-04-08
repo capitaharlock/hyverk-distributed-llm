@@ -1,0 +1,33 @@
+[package]
+name = "hyverk-coordinator"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hyverk-coordinator"
+path = "src/main.rs"
+
+[dependencies]
+hyverk-proto = { path = "../../shared/proto" }
+hyverk-core = { path = "../../shared/core" }
+hyverk-synthesis = { path = "../../shared/synthesis" }
+hyverk-sandbox = { path = "../../server/sandbox" }
+hyverk-rag = { path = "../../server/rag" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+tokio-util = "0.7"
+dirs = "5"
+base64 = "0.22"
+reqwest = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+hyverk-comms = { path = "../../shared/comms" }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

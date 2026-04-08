@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hyverk — Test</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0a0e14;color:#c9d1d9;height:100vh;display:flex;flex-direction:column}
+    .header{padding:0 20px;height:52px;border-bottom:1px solid #1b2028;display:flex;align-items:center;gap:12px;background:#0d1117;flex-shrink:0}
+    .logo{font-size:20px;font-weight:700;color:#f0f6fc;text-decoration:none}
+    .nav{display:flex;gap:6px;margin-left:16px}
+    .nav a{font-size:13px;padding:5px 12px;border:1px solid #1b2028;border-radius:5px;color:#8b949e;text-decoration:none}
+    .nav a:hover{color:#f0f6fc;border-color:#30363d}
+    .nav a.active{color:#58a6ff;border-color:#1f6feb}
+    .hright{margin-left:auto;font-size:13px;color:#484f58}
+    .main{flex:1;display:grid;grid-template-columns:1fr 1fr;overflow:hidden}
+    .panel{padding:16px;overflow-y:auto;display:flex;flex-direction:column}
+    .panel:first-child{border-right:1px solid #1b2028}
+    .ptitle{font-size:13px;font-weight:700;color:#58a6ff;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+    textarea{min-height:100px;background:#111820;border:1px solid #1b2028;border-radius:8px;color:#c9d1d9;font-size:14px;padding:12px;resize:vertical;outline:none;font-family:inherit}
+    textarea:focus{border-color:#1f6feb}
+    .controls{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap}
+    .btn{padding:7px 18px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;border:none}
+    .btn-go{background:#238636;color:#fff}.btn-go:hover{background:#2ea043}
+    .btn-go:disabled{background:#1b2028;color:#484f58;cursor:not-allowed}
+    select,input[type=number]{background:#111820;border:1px solid #1b2028;color:#c9d1d9;padding:5px 8px;border-radius:5px;font-size:13px}
+    .status-msg{font-size:13px;color:#8b949e;margin-left:auto}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid #484f58;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    /* Chat */
+    .chat{flex:1;overflow-y:auto;margin-top:10px}
+    .msg{border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:14px;white-space:pre-wrap;word-break:break-word}
+    .msg.user{background:#0d1822;border:1px solid #1f6feb;border-left:3px solid #1f6feb}
+    .msg.bot{background:#111820;border:1px solid #1b2028;border-left:3px solid #3fb950}
+    /* Code */
+    .code-card{background:#111820;border:1px solid #1b2028;border-radius:8px;margin-bottom:10px;overflow:hidden}
+    .code-header{display:flex;flex-wrap:wrap;gap:10px;padding:10px 12px;background:#161b22;border-bottom:1px solid #1b2028;font-size:12px;color:#8b949e}
+    .code-header b{color:#c9d1d9}
+    .code-header .hi{color:#3fb950}
+    .code-body{padding:12px;font-family:'SF Mono','Fira Code',monospace;font-size:13px;color:#c9d1d9;white-space:pre;overflow-x:auto;line-height:1.5}
+    .code-body .kw{color:#ff7b72}.code-body .str{color:#a5d6ff}.code-body .cm{color:#8b949e}.code-body .fn{color:#d2a8ff}.code-body .num{color:#79c0ff}
+    /* Debug panel */
+    .debug-toggle{font-size:12px;color:#58a6ff;cursor:pointer;padding:6px 12px;text-decoration:underline}
+    .debug-panel{background:#0d1117;border:1px solid #1b2028;border-radius:6px;padding:10px;margin:0 12px 10px;font-family:'SF Mono',monospace;font-size:11px;color:#8b949e;display:none;white-space:pre;overflow-x:auto;max-height:200px;overflow-y:auto}
+    .debug-panel.open{display:block}
+    .cluster-node{background:#111820;border:1px solid #1b2028;border-radius:6px;padding:8px 10px;margin:4px 12px;font-size:12px}
+    .cluster-node .cn-name{font-weight:600;color:#f0f6fc}
+    .cluster-node .cn-role{color:#3fb950;font-size:11px}
+    .cluster-node .cn-detail{color:#8b949e;margin-top:3px;display:flex;gap:12px;flex-wrap:wrap}
+    .cluster-node .cn-detail span b{color:#c9d1d9;font-family:'SF Mono',monospace}
+    .empty{color:#484f58;font-size:14px;text-align:center;padding:30px}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <a href="/" class="logo">Hyverk</a>
+    <div class="nav">
+      <a href="/">Dashboard</a><a href="/models">Models</a><a href="/devices">Devices</a><a href="/test" class="active">Test</a>
+    </div>
+    <button class="btn btn-go" style="margin-left:auto;padding:5px 14px;font-size:12px" id="btn-mode" onclick="toggleMode()">Activate Inference</button>
+    <span class="hright" id="cluster-status" style="margin-left:8px">checking...</span>
+  </div>
+  <div class="main">
+    <div class="panel">
+      <div class="ptitle">Conversation</div>
+      <textarea id="prompt" placeholder="Ask Hyverk to write code...">Write a Python function that implements binary search on a sorted list. Include type hints and docstring.</textarea>
+      <div class="controls">
+        <button class="btn btn-go" id="btn" onclick="send()" disabled>Cluster Offline</button>
+        <label style="font-size:12px;color:#6e7681">Tokens:</label>
+        <input type="number" id="maxtok" value="512" min="50" max="2048" style="width:65px">
+        <span class="status-msg" id="status"></span>
+      </div>
+      <div class="chat" id="chat"></div>
+    </div>
+    <div class="panel">
+      <div class="ptitle">Code + Debug</div>
+      <div id="results"><div class="empty">Responses appear here with cluster debug info</div></div>
+    </div>
+  </div>
+<script>
+const API='';
+let clusterOnline=false;
+
+// Check cluster via coordinator proxy
+async function checkCluster(){
+  try{
+    const r=await fetch(API+'/api/v1/nodes');
+    const d=await r.json();
+    const gpu=d.nodes.filter(n=>n.has_gpu);
+    if(gpu.length>0){
+      clusterOnline=true;
+      document.getElementById('btn').disabled=false;
+      document.getElementById('btn').textContent='Generate (Distributed)';
+      document.getElementById('cluster-status').textContent=d.nodes.length+' nodes ('+gpu.length+' GPU)';
+      document.getElementById('cluster-status').style.color='#3fb950';
+    }else{
+      clusterOnline=d.nodes.length>0; // allow even without GPU for testing
+      document.getElementById('btn').disabled=!clusterOnline;
+      document.getElementById('btn').textContent=clusterOnline?'Generate':'No nodes online';
+      document.getElementById('cluster-status').textContent=d.nodes.length+' nodes (no GPU)';
+      document.getElementById('cluster-status').style.color=clusterOnline?'#d29922':'#f85149';
+    }
+  }catch{
+    clusterOnline=false;
+    document.getElementById('btn').disabled=true;
+    document.getElementById('btn').textContent='Coordinator Offline';
+    document.getElementById('cluster-status').textContent='offline';
+    document.getElementById('cluster-status').style.color='#f85149';
+  }
+}
+checkCluster();setInterval(checkCluster,10000);
+
+async function send(){
+  const prompt=document.getElementById('prompt').value.trim();
+  if(!prompt||!clusterOnline)return;
+  const maxTok=parseInt(document.getElementById('maxtok').value)||512;
+  const btn=document.getElementById('btn');
+  const st=document.getElementById('status');
+
+  // Add user message to chat
+  addChat('user',prompt);
+  btn.disabled=true;
+  st.innerHTML='<span class="spinner"></span> Generating (distributed)...';
+  const t0=Date.now();
+
+  try{
+    // Real distributed inference via WS chain: Mac(0-9) → node-1(10-19) → node-2(20-28)
+    st.innerHTML='<span class="spinner"></span> Routing through 3-node WS chain...';
+    const resp=await fetch(API+'/api/v1/ws-inference',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt:prompt,max_tokens:maxTok,temperature:0.3})
+    });
+    const data=await resp.json();
+    if(data.error)throw new Error(data.error+(data.hint?'\n'+data.hint:''));
+    const totalMs=Date.now()-t0;
+
+    // Add assistant text to chat (non-code parts)
+    const text=data.text||'';
+    const textParts=text.split(/```[\w]*\n?/);
+    const codeParts=text.match(/```[\w]*\n[\s\S]*?```/g)||[];
+    if(textParts[0]&&textParts[0].trim())addChat('bot',textParts[0].trim());
+
+    // Add code + debug to right panel
+    addResult(text,codeParts,{
+      tokens:data.tokens,elapsed:data.elapsed_secs,tps:data.tokens_per_sec,
+      distributed:data.distributed,cluster:data.cluster||[],
+      totalMs,position:data.position,layers:data.layers
+    });
+
+    // Add remaining text after code
+    for(let i=1;i<textParts.length;i++){
+      if(textParts[i]&&textParts[i].trim())addChat('bot',textParts[i].trim());
+    }
+
+    st.textContent='Done in '+(totalMs/1000).toFixed(1)+'s (distributed)';
+  }catch(e){
+    st.textContent='Error: '+e.message;
+  }
+  btn.disabled=false;
+}
+
+function addChat(role,text){
+  const c=document.getElementById('chat');
+  const d=document.createElement('div');
+  d.className='msg '+role;
+  d.textContent=text;
+  c.appendChild(d);
+  c.scrollTop=c.scrollHeight;
+}
+
+function addResult(fullText,codeParts,meta){
+  const c=document.getElementById('results');
+  if(c.querySelector('.empty'))c.innerHTML='';
+
+  const card=document.createElement('div');
+
+  // Cluster nodes info
+  let clusterHtml='';
+  if(meta.cluster&&meta.cluster.length>0){
+    clusterHtml=meta.cluster.map(n=>`
+      <div class="cluster-node">
+        <span class="cn-name">${esc(n.node)}</span> <span class="cn-role">${esc(n.position)}</span>
+        <div class="cn-detail">
+          <span>Layers: <b>${esc(n.layers)}</b></span>
+          <span>Device: <b>${esc(n.device)}</b></span>
+          <span>Tokens: <b>${n.tokens_processed}</b></span>
+          <span>Role: <b>${esc(n.role)}</b></span>
+        </div>
+      </div>
+    `).join('');
+  }else{
+    // Fallback for when cluster info isn't in response yet
+    clusterHtml=`
+      <div class="cluster-node">
+        <span class="cn-name">Node A</span> <span class="cn-role">first</span>
+        <div class="cn-detail"><span>Layers: <b>0-14</b></span><span>Role: <b>embed + forward + capture hidden</b></span></div>
+      </div>
+      <div class="cluster-node">
+        <span class="cn-name">Node B</span> <span class="cn-role">last</span>
+        <div class="cn-detail"><span>Layers: <b>14-28</b></span><span>Role: <b>receive hidden + forward + generate</b></span></div>
+      </div>`;
+  }
+
+  // Code blocks with syntax highlighting
+  let codeHtml='';
+  if(codeParts&&codeParts.length>0){
+    codeParts.forEach(block=>{
+      const lang=block.match(/```(\w+)/)?.[1]||'';
+      const code=block.replace(/```\w*\n?/,'').replace(/```$/,'');
+      codeHtml+=`<div class="code-card"><div class="code-body">${highlightCode(esc(code))}</div></div>`;
+    });
+  }else if(fullText){
+    codeHtml=`<div class="code-card"><div class="code-body">${highlightCode(esc(fullText))}</div></div>`;
+  }
+
+  const id='dbg-'+Date.now();
+  card.innerHTML=`
+    <div class="code-card">
+      <div class="code-header">
+        <span>Distributed: <b class="hi">YES</b></span>
+        <span>Inference: <b class="hi">${(meta.elapsed||0)}s</b></span>
+        <span>Total: <b>${(meta.totalMs/1000).toFixed(1)}s</b></span>
+        <span>Tokens: <b>${meta.tokens||0}</b></span>
+        <span>${(meta.tps||0)} tok/s</span>
+      </div>
+      ${clusterHtml}
+      <span class="debug-toggle" onclick="document.getElementById('${id}').classList.toggle('open')">Raw JSON</span>
+      <div class="debug-panel" id="${id}">${esc(JSON.stringify(meta,null,2))}</div>
+    </div>
+    ${codeHtml}
+  `;
+  c.prepend(card);
+}
+
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+function highlightCode(s){
+  // Basic syntax highlighting (safe — input already escaped)
+  return s
+    .replace(/\b(def|class|return|if|elif|else|for|while|import|from|as|in|not|and|or|is|None|True|False|try|except|raise|with|yield|async|await|fn|let|mut|pub|struct|impl|use|match|enum|trait|const|static|self)\b/g,'<span class="kw">$1</span>')
+    .replace(/(&quot;.*?&quot;|'.*?')/g,'<span class="str">$1</span>')
+    .replace(/(#.*$)/gm,'<span class="cm">$1</span>')
+    .replace(/\b(\d+\.?\d*)\b/g,'<span class="num">$1</span>');
+}
+
+document.getElementById('prompt').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send()});
+
+async function toggleMode(){
+  const btn=document.getElementById('btn-mode');
+  if(clusterOnline){
+    // Switch to training
+    btn.textContent='Switching to Training...';btn.disabled=true;
+    // Send signal to coordinator to switch all nodes to training mode
+    await fetch(API+'/api/v1/node/signal',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({signal:'switch_role',role:'trainer',urgency:'graceful',node_id:'all'})}).catch(()=>{});
+    btn.textContent='Activate Inference';btn.disabled=false;
+    alert('Signal sent to coordinator. Run "make training" locally to complete the switch.');
+  }else{
+    // Switch to inference
+    btn.textContent='Activating...';btn.disabled=true;
+    // Send signal to coordinator to switch GPU nodes to inference mode
+    await fetch(API+'/api/v1/node/signal',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({signal:'switch_role',role:'executor',urgency:'immediate',node_id:'all'})}).catch(()=>{});
+    btn.textContent='Deactivate Inference';btn.disabled=false;
+    alert('Signal sent to coordinator. Run "make inference" locally to start the cluster.\n\nThe cluster will start on localhost:18000.');
+  }
+  setTimeout(checkCluster,3000);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hyverk — Dashboard</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0a0e14;color:#c9d1d9;font-size:15px;height:100vh;overflow:hidden}
+    a{color:#58a6ff;text-decoration:none}
+    .layout{display:grid;grid-template-columns:280px 1fr;grid-template-rows:52px 1fr;height:100vh}
+    .header{grid-column:1/-1;padding:0 20px;border-bottom:1px solid #1b2028;display:flex;align-items:center;gap:12px;background:#0d1117}
+    .logo{font-size:20px;font-weight:700;color:#f0f6fc}
+    .dot{width:9px;height:9px;border-radius:50%}
+    .dot.on{background:#3fb950;box-shadow:0 0 6px rgba(63,185,80,.5)}.dot.off{background:#f85149}
+    .hinfo{font-size:14px;color:#8b949e}
+    .nav{display:flex;gap:6px;margin-left:16px}
+    .nav a{font-size:13px;padding:5px 12px;border:1px solid #1b2028;border-radius:5px;color:#8b949e}
+    .nav a:hover{color:#f0f6fc;border-color:#30363d}
+    .nav a.active{color:#58a6ff;border-color:#1f6feb}
+    .hright{margin-left:auto;font-size:13px;color:#484f58}
+    .panel{padding:16px;overflow-y:auto}
+    .panel:first-of-type{border-right:1px solid #1b2028;background:#0c1015}
+    .sec{font-size:11px;font-weight:700;color:#58a6ff;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:10px}
+    .divider{font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1px;margin:14px 0 6px;padding-bottom:3px;border-bottom:1px solid #1b2028}
+    .mstats{display:grid;gap:6px;margin-bottom:12px}
+    .g2{grid-template-columns:1fr 1fr}
+    .ms{background:#111820;border:1px solid #1b2028;border-radius:6px;padding:8px;text-align:center}
+    .ms-v{font-size:22px;font-weight:700;color:#f0f6fc}
+    .ms-v.g{color:#3fb950}.ms-v.b{color:#58a6ff}.ms-v.o{color:#d29922}
+    .ms-l{font-size:9px;color:#6e7681;text-transform:uppercase;margin-top:1px}
+    .kv{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1b2028;font-size:14px}
+    .kv:last-child{border-bottom:none}
+    .kk{color:#6e7681}.kv-v{color:#c9d1d9;font-family:'SF Mono',monospace;font-size:13px}
+    .spark-wrap{background:#111820;border:1px solid #1b2028;border-radius:5px;padding:4px;margin-bottom:10px}
+    /* Right panel */
+    .model-header{background:#111820;border:1px solid #1b2028;border-radius:8px;padding:14px;margin-bottom:14px;display:flex;gap:20px;align-items:center}
+    .mh-left{flex:1}
+    .mh-name{font-size:18px;font-weight:700;color:#f0f6fc}
+    .mh-sub{font-size:13px;color:#6e7681;margin-top:2px}
+    .mh-specs{display:flex;gap:16px;margin-top:8px;font-size:12px;flex-wrap:wrap}
+    .mh-spec{color:#8b949e}
+    .mh-spec b{color:#c9d1d9;font-family:'SF Mono',monospace}
+    .mh-right{text-align:right}
+    .mh-pct{font-size:36px;font-weight:700;color:#d29922}
+    .mh-phase{font-size:12px;color:#6e7681;margin-top:2px}
+    /* Phase tabs — clickable */
+    .phases{display:flex;gap:0;margin-bottom:14px;border-bottom:2px solid #1b2028}
+    .ph{flex:1;padding:8px 4px;font-size:13px;text-align:center;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;color:#484f58;transition:all .2s}
+    .ph:hover{color:#c9d1d9}
+    .ph.done{color:#3fb950}
+    .ph.active{color:#58a6ff;border-bottom-color:#1f6feb}
+    .ph.selected{color:#f0f6fc;border-bottom-color:#f0f6fc}
+    .ph .ph-n{font-weight:700;margin-right:2px}
+    .ph .ph-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px}
+    .ph .ph-dot.green{background:#3fb950}.ph .ph-dot.blue{background:#1f6feb}.ph .ph-dot.gray{background:#484f58}
+    /* Phase content areas */
+    .phase-view{display:none}
+    .phase-view.visible{display:block}
+    /* Training content */
+    .card{background:#111820;border:1px solid #1b2028;border-radius:8px;padding:14px;margin-bottom:10px}
+    .card-title{font-size:13px;font-weight:600;color:#f0f6fc;margin-bottom:8px}
+    .tstats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+    .ts{text-align:center}
+    .ts-v{font-size:24px;font-weight:700;color:#f0f6fc}
+    .ts-v.g{color:#3fb950}.ts-v.b{color:#58a6ff}.ts-v.o{color:#d29922}
+    .ts-l{font-size:10px;color:#6e7681;text-transform:uppercase;margin-top:1px}
+    .pbar{height:8px;background:#1b2028;border-radius:4px;overflow:hidden;margin:6px 0}
+    .pfill{height:100%;border-radius:4px;transition:width .6s}
+    .pfill.blue{background:linear-gradient(90deg,#1f6feb,#58a6ff)}
+    .pfill.green{background:linear-gradient(90deg,#238636,#3fb950)}
+    .prog-h{display:flex;justify-content:space-between;font-size:14px}
+    .prog-h .l{color:#8b949e}.prog-h .p{font-weight:600;color:#3fb950}
+    .init-summary{font-size:13px;color:#6e7681;background:#111820;border:1px solid #1b2028;border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;gap:16px}
+    .init-item{display:flex;gap:4px;align-items:center}
+    .init-dot{width:6px;height:6px;border-radius:50%;background:#3fb950}
+  </style>
+</head>
+<body>
+<div class="layout">
+  <div class="header">
+    <span class="logo">Hyverk</span>
+    <span class="dot" id="dot"></span>
+    <span class="hinfo" id="status"></span>
+    <div class="nav">
+      <a href="/" class="active">Dashboard</a>
+      <a href="/models">Models</a>
+      <a href="/devices">Devices</a>
+      <a href="/test">Test</a>
+    </div>
+    <span class="hright" id="uptime"></span>
+  </div>
+
+  <!-- LEFT: Network -->
+  <div class="panel">
+    <div class="sec">Network</div>
+    <div class="mstats g2">
+      <div class="ms"><div class="ms-v b" id="n-gpu">0</div><div class="ms-l">GPU Clients</div></div>
+      <div class="ms"><div class="ms-v" id="n-cpu">0</div><div class="ms-l">CPU Clients</div></div>
+    </div>
+    <div class="spark-wrap"><canvas id="spark" height="22" style="width:100%"></canvas></div>
+
+    <div class="divider">Live Work</div>
+    <div class="kv"><span class="kk">Shards sent</span><span class="kv-v" id="w-sent">0</span></div>
+    <div class="kv"><span class="kk">In progress</span><span class="kv-v" style="color:#d29922" id="w-progress">0</span></div>
+    <div class="kv"><span class="kk">Completed</span><span class="kv-v" style="color:#3fb950" id="w-done">0</span></div>
+    <div class="kv"><span class="kk">Pending</span><span class="kv-v" id="w-pending">0</span></div>
+
+    <div class="divider">Synthesis</div>
+    <div class="kv"><span class="kk">Groq generated</span><span class="kv-v" id="s-groq">0</span></div>
+    <div class="kv"><span class="kk">Synthesizing</span><span class="kv-v" id="s-active">0</span></div>
+
+    <div class="divider">Traffic</div>
+    <div class="kv"><span class="kk">Heartbeats</span><span class="kv-v" id="t-hb">0</span></div>
+    <div class="kv"><span class="kk">HTTP</span><span class="kv-v" id="t-http">0</span></div>
+    <div class="kv"><span class="kk">Data</span><span class="kv-v" id="t-bytes">0</span></div>
+  </div>
+
+  <!-- RIGHT: Model -->
+  <div class="panel">
+    <!-- Model info + overall progress -->
+    <div class="model-header">
+      <div class="mh-left">
+        <div class="mh-name" id="m-name">HYVERK v0.1</div>
+        <div class="mh-sub" id="m-sub">Loading...</div>
+        <div class="mh-specs" id="m-specs"></div>
+      </div>
+      <div class="mh-right">
+        <div class="mh-pct" id="v-pct">0%</div>
+        <div class="mh-phase" id="v-phase">initializing</div>
+      </div>
+    </div>
+
+    <!-- Phase tabs -->
+    <div class="phases" id="phase-tabs">
+      <div class="ph" data-phase="init" id="ph-1"><span class="ph-dot gray"></span><span class="ph-n">1</span> Init</div>
+      <div class="ph" data-phase="verify" id="ph-2"><span class="ph-dot gray"></span><span class="ph-n">2</span> Verify</div>
+      <div class="ph" data-phase="training" id="ph-3"><span class="ph-dot gray"></span><span class="ph-n">3</span> Training</div>
+      <div class="ph" data-phase="eval" id="ph-4"><span class="ph-dot gray"></span><span class="ph-n">4</span> Eval</div>
+    </div>
+
+    <!-- Phase 1: Init -->
+    <div class="phase-view" id="pv-init">
+      <div class="card">
+        <div class="card-title">Data Collection</div>
+        <div class="tstats" style="grid-template-columns:1fr 1fr 1fr">
+          <div class="ts"><div class="ts-v" id="in-total">0</div><div class="ts-l">Examples Loaded</div></div>
+          <div class="ts"><div class="ts-v o" id="in-groq">0</div><div class="ts-l">Groq Generated</div></div>
+          <div class="ts"><div class="ts-v" id="in-providers">0</div><div class="ts-l">Data Sources</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">By Category</div>
+        <div id="in-categories" style="font-size:13px;color:#6e7681">No data</div>
+      </div>
+    </div>
+
+    <!-- Phase 2: Verify -->
+    <div class="phase-view" id="pv-verify">
+      <div class="card">
+        <div class="card-title">Verification</div>
+        <div class="tstats" style="grid-template-columns:1fr 1fr 1fr">
+          <div class="ts"><div class="ts-v g" id="vr-passed">0</div><div class="ts-l">Passed</div></div>
+          <div class="ts"><div class="ts-v" style="color:#f85149" id="vr-failed">0</div><div class="ts-l">Failed</div></div>
+          <div class="ts"><div class="ts-v" id="vr-pending">0</div><div class="ts-l">Pending</div></div>
+        </div>
+        <div style="font-size:13px;color:#6e7681;margin-top:8px">Each example is compiled and tested in a sandboxed environment to ensure code quality.</div>
+      </div>
+    </div>
+
+    <!-- Phase 3: Training -->
+    <div class="phase-view" id="pv-training">
+      <!-- Current Goal -->
+      <div class="card" style="border-color:#1f6feb">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div class="card-title" style="color:#58a6ff;margin:0" id="goal-name">Goal: v0.1</div>
+            <div style="font-size:13px;color:#6e7681" id="goal-desc">Loading...</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:11px;color:#6e7681">Target</div>
+            <div style="font-size:18px;font-weight:700;color:#d29922" id="goal-target">100 rounds</div>
+          </div>
+        </div>
+        <div class="prog-h" style="margin-top:10px"><span class="l">Rounds completed</span><span class="p" id="goal-pct">0%</span></div>
+        <div class="pbar"><div class="pfill green" id="goal-bar" style="width:0%"></div></div>
+        <div class="tstats" style="margin-top:8px">
+          <div class="ts"><div class="ts-v b" id="goal-rounds">0</div><div class="ts-l">Rounds Done</div></div>
+          <div class="ts"><div class="ts-v" id="goal-target-n">100</div><div class="ts-l">Target</div></div>
+          <div class="ts"><div class="ts-v o" id="goal-clients">3</div><div class="ts-l">Min Clients</div></div>
+          <div class="ts"><div class="ts-v g" id="tr-loss">--</div><div class="ts-l">Loss</div></div>
+        </div>
+      </div>
+
+      <!-- Current Round (shard detail) -->
+      <div class="card">
+        <div class="card-title">Current Round</div>
+        <div class="prog-h"><span class="l">Shards in this round</span><span class="p" id="tr-pct-label">0%</span></div>
+        <div class="pbar"><div class="pfill blue" id="tr-bar" style="width:0%"></div></div>
+        <div class="tstats">
+          <div class="ts"><div class="ts-v b" id="tr-done">0</div><div class="ts-l">Done</div></div>
+          <div class="ts"><div class="ts-v o" id="tr-progress">0</div><div class="ts-l">Training</div></div>
+          <div class="ts"><div class="ts-v" id="tr-pending">0</div><div class="ts-l">Pending</div></div>
+          <div class="ts"><div class="ts-v" id="tr-total-shards">14</div><div class="ts-l">Total</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Phase 4: Eval -->
+    <div class="phase-view" id="pv-eval">
+      <div class="card">
+        <div class="card-title">Evaluation</div>
+        <div class="tstats" style="grid-template-columns:1fr 1fr">
+          <div class="ts"><div class="ts-v" id="ev-humaneval">--</div><div class="ts-l">HumanEval</div></div>
+          <div class="ts"><div class="ts-v" id="ev-mbpp">--</div><div class="ts-l">MBPP</div></div>
+        </div>
+        <div style="font-size:13px;color:#6e7681;margin-top:8px">Benchmarks run after training round completes to measure model improvement.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const API='';
+let prev=null,prevT=null;
+const sparkData=new Array(40).fill(0);
+function fmtB(b){return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'}
+function fmtUp(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return h>0?h+'h '+m+'m':m+'m'}
+function fmtN(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toString()}
+function drawSpark(d){
+  const c=document.getElementById('spark');if(!c)return;
+  const ctx=c.getContext('2d');c.width=c.offsetWidth*2;c.height=44;
+  ctx.clearRect(0,0,c.width,c.height);const mx=Math.max(1,...d),w=c.width/d.length;
+  ctx.beginPath();ctx.strokeStyle='#1f6feb';ctx.lineWidth=1.5;
+  d.forEach((v,i)=>{const x=i*w,y=c.height-(v/mx)*(c.height-4)-2;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)});
+  ctx.stroke();ctx.lineTo((d.length-1)*w,c.height);ctx.lineTo(0,c.height);ctx.closePath();
+  ctx.fillStyle='rgba(31,111,235,0.05)';ctx.fill();
+}
+
+// Phase tab clicking
+let userSelectedPhase = null;
+document.querySelectorAll('.ph').forEach(tab=>{
+  tab.addEventListener('click',()=>{
+    userSelectedPhase = tab.dataset.phase;
+    showPhase(tab.dataset.phase);
+  });
+});
+
+function showPhase(phase){
+  document.querySelectorAll('.ph').forEach(t=>t.classList.remove('selected'));
+  document.querySelectorAll('.phase-view').forEach(v=>v.classList.remove('visible'));
+  const tab=document.querySelector('.ph[data-phase="'+phase+'"]');
+  if(tab) tab.classList.add('selected');
+  const view=document.getElementById('pv-'+phase);
+  if(view) view.classList.add('visible');
+}
+
+async function loadModel(){
+  try{
+    const m=await(await fetch(API+'/api/v1/model')).json();
+    const a=m.architecture,t=m.training_method;
+    document.getElementById('m-sub').textContent=m.base_model+' | '+m.parameters+' | '+t.name;
+    document.getElementById('m-specs').innerHTML=[
+      ['Params',m.parameters],['Trainable',t.trainable_params],['Layers',a.layers],
+      ['Rank',t.lora_rank],['Precision',t.precision],
+    ].map(([k,v])=>'<span class="mh-spec">'+k+': <b>'+v+'</b></span>').join('');
+  }catch(e){}
+}
+
+async function refresh(){
+  let m,model;
+  try{
+    [m,model]=await Promise.all([
+      fetch(API+'/api/v1/metrics').then(r=>r.json()),
+      fetch(API+'/api/v1/model').then(r=>r.json()),
+    ]);
+  }catch{document.getElementById('dot').className='dot off';document.getElementById('status').textContent='offline';return}
+
+  document.getElementById('dot').className='dot on';
+  document.getElementById('status').textContent=m.nodes.total+' node'+(m.nodes.total!==1?'s':'')+' online';
+  document.getElementById('uptime').textContent='uptime '+fmtUp(m.uptime_secs);
+
+  // Network
+  document.getElementById('n-gpu').textContent=model.network.gpu_nodes;
+  document.getElementById('n-cpu').textContent=model.network.cpu_nodes;
+
+  const net=m.network||{};
+  document.getElementById('t-hb').textContent=net.heartbeats||0;
+  document.getElementById('t-http').textContent=net.http_requests||0;
+  document.getElementById('t-bytes').textContent=fmtB((net.bytes_in||0)+(net.bytes_out||0));
+
+  // Synthesis
+  const groq=m.dataset.by_provider?.groq||0;
+  document.getElementById('s-groq').textContent=groq;
+  document.getElementById('s-active').textContent=model.network.cpu_nodes;
+
+  if(prev&&prevT){const dt=(Date.now()-prevT)/1000;if(dt>0){const pps=((net.http_requests||0)-(prev.http_requests||0))/dt;sparkData.push(pps);sparkData.shift();drawSpark(sparkData)}}
+  prev=net;prevT=Date.now();
+
+  // Pipeline
+  const p=model.pipeline;
+  const collected=p.data_collected;
+  const round=p.active_round;
+  let trDone=0,trTotal=0,trLoss=-1,trInProgress=0,trPending=0;
+  if(round){
+    trTotal=round.assignments.length;
+    trDone=round.assignments.filter(a=>a.status==='Complete').length;
+    trInProgress=round.assignments.filter(a=>a.status==='Assigned').length;
+    trPending=trTotal-trDone-trInProgress;
+    const losses=round.assignments.filter(a=>a.training_loss).map(a=>a.training_loss);
+    trLoss=losses.length>0?losses.reduce((a,b)=>a+b)/losses.length:-1;
+  }
+  const trPct=trTotal>0?Math.round(trDone/trTotal*100):0;
+
+  // Live work (network panel)
+  document.getElementById('w-sent').textContent=trTotal;
+  document.getElementById('w-progress').textContent=trInProgress;
+  document.getElementById('w-done').textContent=trDone;
+  document.getElementById('w-pending').textContent=trPending;
+
+  // Init phase data
+  document.getElementById('in-total').textContent=fmtN(collected);
+  document.getElementById('in-groq').textContent=groq;
+  document.getElementById('in-providers').textContent=Object.keys(m.dataset.by_provider||{}).length;
+  const cats=m.dataset.by_category||{};
+  const catMax=Math.max(1,...Object.values(cats));
+  document.getElementById('in-categories').innerHTML=Object.keys(cats).length>0
+    ?Object.entries(cats).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,v])=>{
+      const pct=Math.round(v/catMax*100);
+      return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px"><span style="width:120px;color:#8b949e">'+k+'</span><div style="flex:1;height:4px;background:#1b2028;border-radius:2px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:#1f6feb;border-radius:2px"></div></div><span style="width:40px;text-align:right;font-family:monospace;color:#6e7681;font-size:12px">'+fmtN(v)+'</span></div>';
+    }).join(''):'<span style="color:#484f58">No data</span>';
+
+  // Verify phase data
+  const verified=p.data_verified||0;
+  document.getElementById('vr-passed').textContent=fmtN(verified);
+  document.getElementById('vr-pending').textContent=fmtN(Math.max(0,collected-verified));
+
+  // Phase indicators — dots show state
+  const isTraining=trTotal>0;
+  const ph1=document.getElementById('ph-1');
+  const ph2=document.getElementById('ph-2');
+  const ph3=document.getElementById('ph-3');
+  const ph4=document.getElementById('ph-4');
+
+  // Reset classes (preserve selected)
+  [ph1,ph2,ph3,ph4].forEach(p=>{p.classList.remove('done','active');});
+  if(collected>0){ph1.classList.add('done');ph1.querySelector('.ph-dot').className='ph-dot green';}
+  if(collected>0){ph2.classList.add('done');ph2.querySelector('.ph-dot').className='ph-dot green';}
+  if(isTraining){ph3.classList.add('active');ph3.querySelector('.ph-dot').className='ph-dot blue';}
+  else{ph3.querySelector('.ph-dot').className='ph-dot gray';}
+  ph4.querySelector('.ph-dot').className='ph-dot gray';
+
+  // Training view
+  document.getElementById('tr-done').textContent=trDone;
+  document.getElementById('tr-progress').textContent=trInProgress;
+  document.getElementById('tr-pending').textContent=trPending;
+  document.getElementById('tr-loss').textContent=trLoss>0?trLoss.toFixed(4):'--';
+  document.getElementById('tr-pct-label').textContent=trPct+'%';
+  document.getElementById('tr-bar').style.width=trPct+'%';
+
+  document.getElementById('tr-total-shards').textContent=trTotal;
+
+  // Goals
+  const goals=model.goals||[];
+  const activeGoal=goals.find(g=>g.status==='active')||goals[0]||{};
+  const roundsDone=model.pipeline.rounds_completed||0;
+  const targetRounds=activeGoal.target_rounds||100;
+  const goalPct=Math.min(100,roundsDone/targetRounds*100);
+
+  document.getElementById('goal-name').textContent='Goal: '+activeGoal.name;
+  document.getElementById('goal-desc').textContent=activeGoal.description||'';
+  document.getElementById('goal-target').textContent=targetRounds+' rounds';
+  document.getElementById('goal-rounds').textContent=roundsDone;
+  document.getElementById('goal-target-n').textContent=targetRounds;
+  document.getElementById('goal-clients').textContent=activeGoal.min_clients||0;
+  document.getElementById('goal-pct').textContent=(goalPct<10?goalPct.toFixed(2):goalPct.toFixed(1))+'%';
+  document.getElementById('goal-bar').style.width=goalPct+'%';
+
+  // Estimation
+  const est=model.estimation||{};
+  const etaH=est.eta_hours||0;
+  const etaStr=etaH<0?'calculating...':etaH<1?(etaH*60).toFixed(0)+'m':etaH<24?etaH.toFixed(1)+'h':(etaH/24).toFixed(1)+'d';
+  const rph=est.rounds_per_hour||0;
+
+  // Add estimation text under goal card
+  const goalCard=document.querySelector('#pv-training .card');
+  let estDiv=document.getElementById('est-info');
+  if(!estDiv){estDiv=document.createElement('div');estDiv.id='est-info';estDiv.style.cssText='font-size:13px;color:#6e7681;margin-top:8px;display:flex;gap:16px';goalCard.appendChild(estDiv)}
+  estDiv.innerHTML='<span>ETA: <b style="color:#d29922">'+etaStr+'</b></span>'+
+    '<span>Speed: <b style="color:#58a6ff">'+(rph>0?rph.toFixed(1):'-')+' rounds/h</b></span>'+
+    '<span>Need for 7d: <b>'+(est.clients_for_7d||'-')+'</b> clients</span>'+
+    '<span>Need for 30d: <b>'+(est.clients_for_30d||'-')+'</b> clients</span>';
+
+  // Overall — based on goal progress, not shard progress
+  let overall=goalPct,phaseLabel='Training — '+activeGoal.name;
+  if(!isTraining&&collected>0){overall=0;phaseLabel='Ready to train'}
+  if(!isTraining&&collected===0){overall=0;phaseLabel='Initializing'}
+  document.getElementById('m-name').textContent='HYVERK '+((round&&round.version)||'v0.1');
+  document.getElementById('v-pct').textContent=overall<10?overall.toFixed(2)+'%':overall.toFixed(1)+'%';
+  document.getElementById('v-phase').textContent=phaseLabel;
+
+  // Auto-select active phase (unless user clicked a specific tab)
+  let autoPhase='init';
+  if(isTraining) autoPhase='training';
+  else if(collected>0) autoPhase='init';
+
+  if(!userSelectedPhase){
+    showPhase(autoPhase);
+  }
+}
+
+loadModel();refresh();setInterval(refresh,5000);
+</script>
+</body>
+</html>

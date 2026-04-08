@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hyverk — Models</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0a0e14;color:#c9d1d9;min-height:100vh}
+    .header{padding:0 28px;height:56px;border-bottom:1px solid #1b2028;display:flex;align-items:center;gap:14px;background:#0d1117}
+    .logo{font-size:20px;font-weight:700;color:#f0f6fc;text-decoration:none}
+    .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+    .dot.on{background:#3fb950;box-shadow:0 0 6px rgba(63,185,80,.5)}.dot.off{background:#f85149}
+    .nav-link{font-size:14px;color:#8b949e;text-decoration:none;padding:6px 14px;border:1px solid #1b2028;border-radius:6px}
+    .nav-link:hover{color:#f0f6fc;border-color:#30363d}
+    .nav-link.active{color:#58a6ff;border-color:#1f6feb}
+    .hright{margin-left:auto;font-size:14px;color:#484f58}
+    .main{padding:28px}
+    .page-title{font-size:20px;font-weight:700;color:#f0f6fc;margin-bottom:20px}
+
+    /* Model row — compact horizontal */
+    .model-row{background:#111820;border:1px solid #1b2028;border-radius:8px;padding:14px 20px;margin-bottom:8px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+    .model-row.training{border-left:3px solid #1f6feb}
+    .model-row.released{border-left:3px solid #3fb950}
+    .model-row.queued{border-left:3px solid #484f58}
+
+    .m-id{display:flex;align-items:center;gap:10px;min-width:200px}
+    .version-badge{font-size:18px;font-weight:700;color:#f0f6fc}
+    .status-pill{font-size:12px;padding:2px 10px;border-radius:10px;font-weight:600}
+    .status-pill.training{background:rgba(31,111,235,.15);color:#58a6ff}
+    .status-pill.released{background:rgba(63,185,80,.15);color:#3fb950}
+    .status-pill.queued{background:#1b2028;color:#484f58}
+
+    .m-stats{display:flex;gap:16px;flex:1}
+    .ms{text-align:center;min-width:70px}
+    .ms-val{font-size:16px;font-weight:700;color:#f0f6fc}
+    .ms-val.blue{color:#58a6ff}.ms-val.green{color:#3fb950}.ms-val.orange{color:#d29922}.ms-val.purple{color:#8957e5}
+    .ms-lbl{font-size:10px;color:#6e7681;text-transform:uppercase}
+
+    .m-prog{flex:1;min-width:200px;max-width:300px}
+    .prog-bar{height:6px;background:#1b2028;border-radius:3px;overflow:hidden;margin-top:3px}
+    .prog-fill{height:100%;border-radius:3px;transition:width .6s}
+    .prog-fill.blue{background:linear-gradient(90deg,#1f6feb,#58a6ff)}
+    .prog-fill.green{background:linear-gradient(90deg,#238636,#3fb950)}
+    .prog-lbl{font-size:11px;color:#8b949e;display:flex;justify-content:space-between}
+    .prog-lbl .p{color:#3fb950;font-weight:600}
+
+    .m-date{font-size:13px;color:#6e7681;min-width:120px;text-align:right}
+
+    /* Expandable details (hidden by default) */
+    .m-details{width:100%;display:none;grid-template-columns:1fr 1fr 1fr;gap:14px;font-size:13px;margin-top:10px;padding-top:10px;border-top:1px solid #1b2028}
+    .m-details.open{display:grid}
+    .detail-section{border:1px solid #1b2028;border-radius:6px;padding:10px}
+    .detail-title{font-size:11px;color:#58a6ff;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;font-weight:600}
+    .detail-row{display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #1b2028;font-size:12px}
+    .detail-row:last-child{border-bottom:none}
+    .dk{color:#6e7681}.dv{color:#c9d1d9;font-family:'SF Mono',monospace;font-size:11px}
+    .expand-btn{font-size:12px;color:#58a6ff;cursor:pointer;text-decoration:underline;margin-left:auto}
+
+    .empty{color:#484f58;font-size:15px;text-align:center;padding:40px}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <a href="/" class="logo">Hyverk</a>
+    <span class="dot on" id="dot"></span>
+    <span id="status" style="font-size:14px;color:#8b949e"></span>
+    <div style="display:flex;gap:6px;margin-left:16px">
+      <a href="/" class="nav-link">Dashboard</a>
+      <a href="/models" class="nav-link active">Models</a>
+      <a href="/devices" class="nav-link">Devices</a>
+    <a href="/test" class="nav-link">Test</a>
+    </div>
+    <span class="hright" id="uptime"></span>
+  </div>
+
+  <div class="main">
+    <div class="page-title">Trained Models</div>
+    <div id="models-list"><div class="empty">Loading...</div></div>
+  </div>
+
+  <script>
+    const API = '';
+    function fmtN(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toString()}
+    function fmtUp(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return h>0?h+'h '+m+'m':m+'m '+(s%60)+'s'}
+
+    async function loadModels() {
+      let model, metrics;
+      try {
+        [model, metrics] = await Promise.all([
+          fetch(API+'/api/v1/model').then(r=>r.json()),
+          fetch(API+'/api/v1/metrics').then(r=>r.json()),
+        ]);
+      } catch { return; }
+
+      document.getElementById('uptime').textContent = 'uptime ' + fmtUp(metrics.uptime_secs);
+
+      const p = model.pipeline;
+      const tr = metrics.training;
+      const ds = metrics.dataset;
+      const net = metrics.nodes;
+
+      // Compute overall progress
+      let overallPct = 0;
+      let status = 'queued';
+      let statusLabel = 'Queued';
+      if (tr.total_jobs > 0) {
+        status = 'training';
+        statusLabel = 'Training';
+        overallPct = tr.shards_total > 0 ? Math.round(tr.shards_done / tr.shards_total * 100) : 5;
+      } else if (p.data_collected > 0) {
+        status = 'training';
+        statusLabel = 'Collecting Data';
+        overallPct = Math.min(25, Math.round(p.data_collected_pct / 4));
+      }
+
+      const collPct = p.data_collected_pct || 0;
+      const trainPct = tr.shards_total > 0 ? Math.round(tr.shards_done / tr.shards_total * 100) : 0;
+
+      const now = new Date();
+      const startDate = new Date(now.getTime() - metrics.uptime_secs * 1000);
+
+      const dateStr = startDate.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+      const loss = tr.avg_loss > 0 ? tr.avg_loss.toFixed(4) : '--';
+
+      const html = `
+        <div class="model-row ${status}">
+          <div class="m-id">
+            <span class="version-badge">HYVERK v0.1</span>
+            <span class="status-pill ${status}">${statusLabel}</span>
+          </div>
+          <div class="m-stats">
+            <div class="ms"><div class="ms-val blue">${model.parameters}</div><div class="ms-lbl">Params</div></div>
+            <div class="ms"><div class="ms-val">${model.architecture.layers}L</div><div class="ms-lbl">Layers</div></div>
+            <div class="ms"><div class="ms-val green">${fmtN(p.data_collected)}</div><div class="ms-lbl">Data</div></div>
+            <div class="ms"><div class="ms-val orange">${fmtN(p.data_verified)}</div><div class="ms-lbl">Verified</div></div>
+            <div class="ms"><div class="ms-val purple">${tr.shards_done}/${tr.shards_total}</div><div class="ms-lbl">Shards</div></div>
+            <div class="ms"><div class="ms-val">${loss}</div><div class="ms-lbl">Loss</div></div>
+          </div>
+          <div class="m-prog">
+            <div class="prog-lbl"><span>Data</span><span class="p">${collPct.toFixed(1)}%</span></div>
+            <div class="prog-bar"><div class="prog-fill blue" style="width:${Math.min(100,collPct)}%"></div></div>
+            <div class="prog-lbl" style="margin-top:4px"><span>Training</span><span class="p" style="color:#58a6ff">${trainPct}%</span></div>
+            <div class="prog-bar"><div class="prog-fill green" style="width:${trainPct}%"></div></div>
+          </div>
+          <div class="m-date">${dateStr}<br><span class="expand-btn" onclick="this.closest('.model-row').querySelector('.m-details').classList.toggle('open')">details</span></div>
+
+          <div class="m-details">
+            <div class="detail-section">
+              <div class="detail-title">Base Model</div>
+              <div class="detail-row"><span class="dk">Name</span><span class="dv">${model.base_model}</span></div>
+              <div class="detail-row"><span class="dk">Params</span><span class="dv">${model.parameters}</span></div>
+              <div class="detail-row"><span class="dk">Vocab</span><span class="dv">${model.architecture.vocab_size.toLocaleString()}</span></div>
+              <div class="detail-row"><span class="dk">Context</span><span class="dv">${(model.architecture.context_length/1024)}K</span></div>
+            </div>
+            <div class="detail-section">
+              <div class="detail-title">Fine-tuning</div>
+              <div class="detail-row"><span class="dk">Method</span><span class="dv">${model.training_method.name}</span></div>
+              <div class="detail-row"><span class="dk">LoRA Rank</span><span class="dv">${model.training_method.lora_rank}</span></div>
+              <div class="detail-row"><span class="dk">Trainable</span><span class="dv">${model.training_method.trainable_params}</span></div>
+              <div class="detail-row"><span class="dk">Precision</span><span class="dv">${model.training_method.precision}</span></div>
+            </div>
+            <div class="detail-section">
+              <div class="detail-title">Network</div>
+              <div class="detail-row"><span class="dk">Nodes</span><span class="dv">${net.total}</span></div>
+              <div class="detail-row"><span class="dk">GPU</span><span class="dv">${model.network.gpu_nodes}</span></div>
+              <div class="detail-row"><span class="dk">CPU</span><span class="dv">${model.network.cpu_nodes}</span></div>
+              <div class="detail-row"><span class="dk">Sources</span><span class="dv">${Object.keys(ds.by_provider).length}</span></div>
+            </div>
+          </div>
+        </div>
+
+      `;
+
+      // Add all goals from API as model rows
+      const goals = model.goals || [];
+      goals.forEach((g, i) => {
+        if (i === 0) return; // first goal is the active one shown above
+        const gPct = g.target_rounds > 0 ? Math.round(g.rounds_done / g.target_rounds * 100) : 0;
+        html += '<div class="model-row queued" style="opacity:'+(g.status==='pending'?'0.5':'1')+'">'+
+          '<div class="m-id">'+
+            '<span class="version-badge">HYVERK '+g.name+'</span>'+
+            '<span class="status-pill '+(g.status==='active'?'training':g.status==='complete'?'released':'queued')+'">'+g.status+'</span>'+
+          '</div>'+
+          '<div class="m-stats">'+
+            '<div class="ms"><div class="ms-val">'+g.target_rounds+'</div><div class="ms-lbl">Target Rounds</div></div>'+
+            '<div class="ms"><div class="ms-val">'+fmtN(g.dataset_size)+'</div><div class="ms-lbl">Dataset</div></div>'+
+            '<div class="ms"><div class="ms-val">'+g.min_clients+'</div><div class="ms-lbl">Min Clients</div></div>'+
+            '<div class="ms"><div class="ms-val">~'+g.est_days+'d</div><div class="ms-lbl">Est. Time</div></div>'+
+          '</div>'+
+          '<div class="m-prog"><div class="prog-lbl"><span>'+g.description+'</span></div></div>'+
+        '</div>';
+      });
+
+      document.getElementById('models-list').innerHTML = html;
+    }
+
+    loadModels();
+    setInterval(loadModels, 5000);
+  </script>
+</body>
+</html>
