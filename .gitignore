@@ -1,0 +1,76 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Electron
+electron/node_modules/
+electron/dist/
+electron/out/
+
+# Private context, deploy, infra (NEVER commit)
+_rjj/
+
+# Deploy configs (Fly.io, Docker, entrypoints, platform scripts)
+clients/
+deploy/
+Dockerfile
+*.Dockerfile
+.dockerignore
+config.toml
+config-fly-test.toml
+SETUP-WINDOWS.md
+Makefile
+
+# Experimental/test scripts
+inference/export_onnx.py
+inference/onnx_forward.py
+inference/serve_layers.py
+inference/test*.html
+inference/test_cluster.sh
+training/apply_adapter.py
+training/serve_model.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Models (large binary files)
+*.gguf
+*.onnx
+*.safetensors
+*.bin
+*.pt
+
+# Environment / Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Fly.io
+.fly/
+
+# Distribution artifacts
+dist/
+*.pkg
+*.AppImage
+*.exe
+*.msi
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Training artifacts
+training/tokenizer.json
+
+# Temp
+*.tmp
+*.log

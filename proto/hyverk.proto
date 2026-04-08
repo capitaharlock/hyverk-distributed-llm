@@ -1,0 +1,83 @@
+syntax = "proto3";
+package hyverk;
+
+service NodeCoordinator {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+  rpc PollTask(PollTaskRequest) returns (PollTaskResponse);
+  rpc SubmitResult(SubmitResultRequest) returns (SubmitResultResponse);
+}
+
+// --- Registration ---
+
+message NodeCapabilities {
+  repeated string available_models = 1;
+  string hardware_info = 2;
+  uint32 max_concurrent_tasks = 3;
+}
+
+message RegisterRequest {
+  string node_name = 1;
+  NodeCapabilities capabilities = 2;
+}
+
+message RegisterResponse {
+  string node_id = 1;
+  uint64 heartbeat_interval_secs = 2;
+}
+
+// --- Heartbeat ---
+
+message HeartbeatRequest {
+  string node_id = 1;
+  uint32 active_tasks = 2;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+// --- Deregistration ---
+
+message DeregisterRequest {
+  string node_id = 1;
+}
+
+message DeregisterResponse {
+  bool acknowledged = 1;
+}
+
+// --- Task Polling ---
+
+message PollTaskRequest {
+  string node_id = 1;
+}
+
+message PollTaskResponse {
+  bool has_task = 1;
+  InferenceTask task = 2;
+}
+
+message InferenceTask {
+  string task_id = 1;
+  string model = 2;
+  string prompt = 3;
+  double temperature = 4;
+  uint32 max_tokens = 5;
+}
+
+// --- Result Submission ---
+
+message SubmitResultRequest {
+  string node_id = 1;
+  string task_id = 2;
+  bool success = 3;
+  string response_text = 4;
+  string error_message = 5;
+  uint64 duration_ms = 6;
+}
+
+message SubmitResultResponse {
+  bool acknowledged = 1;
+}

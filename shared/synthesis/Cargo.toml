@@ -1,0 +1,16 @@
+[package]
+name = "hyverk-synthesis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hyverk-sandbox = { path = "../../server/sandbox" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["time"] }

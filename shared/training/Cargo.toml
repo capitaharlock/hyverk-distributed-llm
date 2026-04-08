@@ -1,0 +1,29 @@
+[package]
+name = "hyverk-training"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+metal = ["candle-core/metal"]
+
+[dependencies]
+hyverk-core = { path = "../../shared/core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+
+# ML framework
+candle-core = { version = "0.8" }
+candle-nn = { version = "0.8" }
+
+# Tokenizer (HuggingFace BPE tokenizer.json format)
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+# Model weights
+safetensors = "0.4"
+hf-hub = { version = "0.3", features = ["tokio"] }
+tempfile = "3"
+libc = "0.2"
