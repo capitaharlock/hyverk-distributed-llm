@@ -3,10 +3,10 @@
 // Sends results back through the same connection.
 // Works behind NAT/firewalls because the client initiates the connection.
 
-use hyverk_comms::messages::{ClientMessage, CoordinatorMessage};
 use futures_util::{SinkExt, StreamExt};
+use hyverk_comms::messages::{ClientMessage, CoordinatorMessage};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// Run the WebSocket worker loop. Reconnects on failure.
 pub async fn run_ws_worker(
@@ -24,14 +24,15 @@ pub async fn run_ws_worker(
         .replace("http://", "ws://");
     let ws_url = format!("{}/ws", ws_url.trim_end_matches('/'));
 
-    // Download assigned layers on startup
-    // Layer assignment: coordinator tells each node which layers via config
-    // For now: auto-detect based on node name
-    let (layer_start, layer_end) = if node_name.contains("node-2") || node_name.contains("fly-node-iad-2") {
-        (14, 28) // node-2: layers 14-27 + norm + lm_head
-    } else {
-        (0, 14) // node-1: embed + layers 0-13
-    };
+    // GPU nodes use GGUF+llama.cpp for full inference, CPU nodes use distributed PyTorch layers
+    let use_distributed_inference = !has_gpu;
+
+    let (layer_start, layer_end) =
+        if node_name.contains("node-2") || node_name.contains("fly-node-iad-2") {
+            (14, 28) // node-2: layers 14-27 + norm + lm_head
+        } else {
+            (0, 14) // node-1: embed + layers 0-13
+        };
 
     let layer_cache = format!("{}/inference_layers_{layer_start}_{layer_end}", model_dir);
     let coordinator_http = coordinator_url
@@ -43,29 +44,37 @@ pub async fn run_ws_worker(
     let layers_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let download_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Download layers with retry (up to 3 attempts)
-    info!(layers = format!("{layer_start}-{layer_end}"), cache = %layer_cache, "Downloading assigned layers...");
-    let mut download_ok = false;
-    for attempt in 1..=3 {
-        match download_layers(&layer_cache, &coordinator_http, layer_start, layer_end).await {
-            Ok(()) => {
-                info!("Layer weights ready (attempt {attempt})");
-                layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                download_ok = true;
-                break;
-            }
-            Err(e) => {
-                warn!("Layer download failed (attempt {attempt}/3): {e}");
-                if attempt < 3 {
-                    info!("Retrying download in 10s...");
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    if use_distributed_inference {
+        // CPU nodes: download PyTorch layers for distributed inference
+        info!(layers = format!("{layer_start}-{layer_end}"), cache = %layer_cache, "Downloading assigned layers...");
+        let mut download_ok = false;
+        for attempt in 1..=3 {
+            match download_layers(&layer_cache, &coordinator_http, layer_start, layer_end).await {
+                Ok(()) => {
+                    info!("Layer weights ready (attempt {attempt})");
+                    layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                    download_ok = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!("Layer download failed (attempt {attempt}/3): {e}");
+                    if attempt < 3 {
+                        info!("Retrying download in 10s...");
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
                 }
             }
         }
-    }
-    if !download_ok {
-        error!("Layer download failed after 3 attempts — inference will not work on this node");
-        download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+        if !download_ok {
+            error!("Layer download failed after 3 attempts — inference will not work on this node");
+            download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    } else {
+        // GPU nodes: skip layer download, use GGUF+llama.cpp for full inference
+        info!(
+            "GPU node detected — using GGUF+llama.cpp for full inference (skipping layer download)"
+        );
+        layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     loop {
@@ -103,6 +112,18 @@ async fn connect_and_run(
     let (ws, _) = connect_async(ws_url).await?;
     let (mut sink, mut stream) = ws.split();
 
+    // Determine layer range based on node type
+    let layer_range = if has_gpu {
+        Some((0, 28)) // GPU nodes handle full model with GGUF+llama.cpp
+    } else {
+        // CPU nodes get assigned range based on name
+        if node_name.contains("node-2") || node_name.contains("fly-node-iad-2") {
+            Some((14, 28))
+        } else {
+            Some((0, 14))
+        }
+    };
+
     // Register
     let reg = ClientMessage::Register {
         node_name: node_name.to_string(),
@@ -110,22 +131,31 @@ async fn connect_and_run(
         models: vec![],
         ram_mb,
         has_gpu,
+        layer_range,
     };
-    sink.send(Message::Text(serde_json::to_string(&reg)?.into())).await?;
+    sink.send(Message::Text(serde_json::to_string(&reg)?.into()))
+        .await?;
 
     // Report current state
     let current_state = if layers_ready.load(std::sync::atomic::Ordering::SeqCst) {
         ("ready".to_string(), "Layer weights loaded".to_string())
     } else if download_failed.load(std::sync::atomic::Ordering::SeqCst) {
-        ("error".to_string(), "Layer download failed after 3 attempts".to_string())
+        (
+            "error".to_string(),
+            "Layer download failed after 3 attempts".to_string(),
+        )
     } else {
-        ("downloading".to_string(), "Downloading model layers".to_string())
+        (
+            "downloading".to_string(),
+            "Downloading model layers".to_string(),
+        )
     };
     let state_msg = ClientMessage::StateUpdate {
         state: current_state.0,
         detail: current_state.1,
     };
-    sink.send(Message::Text(serde_json::to_string(&state_msg)?.into())).await?;
+    sink.send(Message::Text(serde_json::to_string(&state_msg)?.into()))
+        .await?;
     info!("WebSocket connected and registered");
 
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -202,10 +232,18 @@ async fn handle_coordinator_message(
     model_dir: &str,
 ) -> Option<WsResponse> {
     match msg {
-        CoordinatorMessage::InferenceStart { request_id, token_ids, layer_start, layer_end, max_tokens, temperature } => {
+        CoordinatorMessage::InferenceStart {
+            request_id,
+            token_ids,
+            layer_start,
+            layer_end,
+            max_tokens,
+            temperature,
+        } => {
             info!(request_id = %request_id, layers = format!("{layer_start}-{layer_end}"), tokens = token_ids.len(), "Inference start: embed + forward");
 
-            let result = run_layer_forward(model_dir, &token_ids, layer_start, layer_end, true).await;
+            let result =
+                run_layer_forward(model_dir, &token_ids, layer_start, layer_end, true).await;
 
             match result {
                 Ok((hidden_data, shape)) => {
@@ -216,7 +254,8 @@ async fn handle_coordinator_message(
                         shape,
                     };
                     let mut payload = vec![0u8; 36];
-                    payload[..request_id.len().min(36)].copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
+                    payload[..request_id.len().min(36)]
+                        .copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
                     payload.extend_from_slice(&hidden_data);
                     Some(WsResponse::TextAndBinary(msg, payload))
                 }
@@ -226,24 +265,29 @@ async fn handle_coordinator_message(
                 }
             }
         }
-        CoordinatorMessage::InferenceForward { request_id, layer_start, layer_end, is_last, .. } => {
+        CoordinatorMessage::InferenceForward {
+            request_id,
+            layer_start,
+            layer_end,
+            is_last,
+            ..
+        } => {
             info!(request_id = %request_id, layers = format!("{layer_start}-{layer_end}"), last = is_last, "Inference forward received");
             // Hidden states arrive as binary frame — handled in handle_binary_forward
             None
         }
-        CoordinatorMessage::Ping => {
-            Some(WsResponse::Text(ClientMessage::Pong))
-        }
+        CoordinatorMessage::Ping => Some(WsResponse::Text(ClientMessage::Pong)),
         _ => None,
     }
 }
 
-async fn handle_binary_forward(
-    data: Vec<u8>,
-    model_dir: &str,
-) -> Option<WsResponse> {
-    if data.len() < 36 { return None; }
-    let request_id = String::from_utf8_lossy(&data[..36]).trim_end_matches('\0').to_string();
+async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsResponse> {
+    if data.len() < 36 {
+        return None;
+    }
+    let request_id = String::from_utf8_lossy(&data[..36])
+        .trim_end_matches('\0')
+        .to_string();
     let hidden_data = data[36..].to_vec();
 
     info!(request_id = %request_id, size = hidden_data.len(), "Received hidden states for forward pass");
@@ -269,11 +313,16 @@ async fn handle_binary_forward(
 
     let mut cmd = tokio::process::Command::new(&python);
     cmd.arg(&script)
-        .arg("--mode").arg(mode)
-        .arg("--model-dir").arg(model_dir)
-        .arg("--layer-start").arg(layer_start.to_string())
-        .arg("--layer-end").arg(layer_end.to_string())
-        .arg("--input-file").arg(&input_file);
+        .arg("--mode")
+        .arg(mode)
+        .arg("--model-dir")
+        .arg(model_dir)
+        .arg("--layer-start")
+        .arg(layer_start.to_string())
+        .arg("--layer-end")
+        .arg(layer_end.to_string())
+        .arg("--input-file")
+        .arg(&input_file);
 
     if !is_last {
         cmd.arg("--output-file").arg(&output_file);
@@ -281,8 +330,14 @@ async fn handle_binary_forward(
 
     let out = match tokio::time::timeout(std::time::Duration::from_secs(600), cmd.output()).await {
         Ok(Ok(o)) => o,
-        Ok(Err(e)) => { error!("Forward script error: {e}"); return None; }
-        Err(_) => { error!("Forward timed out"); return None; }
+        Ok(Err(e)) => {
+            error!("Forward script error: {e}");
+            return None;
+        }
+        Err(_) => {
+            error!("Forward timed out");
+            return None;
+        }
     };
 
     let _ = std::fs::remove_file(&input_file);
@@ -311,8 +366,13 @@ async fn handle_binary_forward(
         let hidden_out = std::fs::read(&output_file).ok()?;
         let _ = std::fs::remove_file(&output_file);
         let result: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-        let shape = result["shape"].as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+        let shape = result["shape"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as usize))
+                    .collect()
+            })
             .unwrap_or_default();
 
         info!(request_id = %request_id, hidden_size = hidden_out.len(), "Forward complete");
@@ -322,7 +382,8 @@ async fn handle_binary_forward(
             shape,
         };
         let mut payload = vec![0u8; 36];
-        payload[..request_id.len().min(36)].copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
+        payload[..request_id.len().min(36)]
+            .copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
         payload.extend_from_slice(&hidden_out);
         Some(WsResponse::TextAndBinary(msg, payload))
     }
@@ -330,10 +391,15 @@ async fn handle_binary_forward(
 
 fn parse_layer_range(model_dir: &str) -> (usize, usize) {
     // Parse from path like: .../inference_layers_10_20
-    let parts: Vec<&str> = model_dir.rsplit('/').next().unwrap_or("").split('_').collect();
+    let parts: Vec<&str> = model_dir
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .split('_')
+        .collect();
     if parts.len() >= 4 {
-        let start = parts[parts.len()-2].parse().unwrap_or(0);
-        let end = parts[parts.len()-1].parse().unwrap_or(28);
+        let start = parts[parts.len() - 2].parse().unwrap_or(0);
+        let end = parts[parts.len() - 1].parse().unwrap_or(28);
         (start, end)
     } else {
         (0, 28) // fallback: all layers
@@ -356,21 +422,28 @@ async fn run_layer_forward(
 
     let mut cmd = tokio::process::Command::new(&python);
     cmd.arg(&script)
-        .arg("--mode").arg(mode)
-        .arg("--model-dir").arg(model_dir)
-        .arg("--layer-start").arg(layer_start.to_string())
-        .arg("--layer-end").arg(layer_end.to_string())
-        .arg("--output-file").arg(&output_file);
+        .arg("--mode")
+        .arg(mode)
+        .arg("--model-dir")
+        .arg(model_dir)
+        .arg("--layer-start")
+        .arg(layer_start.to_string())
+        .arg("--layer-end")
+        .arg(layer_end.to_string())
+        .arg("--output-file")
+        .arg(&output_file);
 
     if is_first {
-        let ids_str: String = token_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        let ids_str: String = token_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         cmd.arg("--token-ids").arg(&ids_str);
     }
 
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(600),
-        cmd.output(),
-    ).await
+    let out = tokio::time::timeout(std::time::Duration::from_secs(600), cmd.output())
+        .await
         .map_err(|_| "Forward pass timed out")?
         .map_err(|e| format!("Failed to run forward script: {e}"))?;
 
@@ -380,15 +453,20 @@ async fn run_layer_forward(
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let result: serde_json::Value = serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("Bad forward result: {e}"))?;
+    let result: serde_json::Value =
+        serde_json::from_str(stdout.trim()).map_err(|e| format!("Bad forward result: {e}"))?;
 
-    let hidden_data = std::fs::read(&output_file)
-        .map_err(|e| format!("Can't read hidden states: {e}"))?;
+    let hidden_data =
+        std::fs::read(&output_file).map_err(|e| format!("Can't read hidden states: {e}"))?;
     let _ = std::fs::remove_file(&output_file);
 
-    let shape = result["shape"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+    let shape = result["shape"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect()
+        })
         .unwrap_or_default();
 
     Ok((hidden_data, shape))
@@ -406,16 +484,23 @@ async fn download_layers(
 
     let out = tokio::process::Command::new(&python)
         .arg(&script)
-        .arg("--mode").arg("download")
-        .arg("--model-dir").arg(model_dir)
-        .arg("--coordinator").arg(coordinator_url)
-        .arg("--layer-start").arg(layer_start.to_string())
-        .arg("--layer-end").arg(layer_end.to_string())
+        .arg("--mode")
+        .arg("download")
+        .arg("--model-dir")
+        .arg(model_dir)
+        .arg("--coordinator")
+        .arg(coordinator_url)
+        .arg("--layer-start")
+        .arg(layer_start.to_string())
+        .arg("--layer-end")
+        .arg(layer_end.to_string())
         .output()
         .await?;
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    for line in stderr.lines() { info!(target: "download", "{}", line); }
+    for line in stderr.lines() {
+        info!(target: "download", "{}", line);
+    }
 
     if !out.status.success() {
         return Err(format!("Layer download failed: {stderr}").into());
@@ -428,7 +513,9 @@ async fn download_layers(
 
 fn find_python() -> String {
     for p in &[".venv/bin/python3", "/usr/bin/python3", "python3"] {
-        if std::path::Path::new(p).exists() { return p.to_string(); }
+        if std::path::Path::new(p).exists() {
+            return p.to_string();
+        }
     }
     "python3".to_string()
 }
@@ -436,7 +523,9 @@ fn find_python() -> String {
 fn find_script(name: &str) -> String {
     for prefix in &["", "../", "../../", "/app/"] {
         let p = format!("{}{}", prefix, name);
-        if std::path::Path::new(&p).exists() { return p; }
+        if std::path::Path::new(&p).exists() {
+            return p;
+        }
     }
     name.to_string()
 }

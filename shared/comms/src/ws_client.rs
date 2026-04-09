@@ -4,7 +4,7 @@
 use crate::messages::{ClientMessage, CoordinatorMessage};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 pub struct WsClient {
     coordinator_url: String,
@@ -34,7 +34,10 @@ impl WsClient {
         }
     }
 
-    async fn connect_and_handle<F>(&self, handler: &F) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    async fn connect_and_handle<F>(
+        &self,
+        handler: &F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     where
         F: Fn(CoordinatorMessage) -> Option<ClientMessage>,
     {
@@ -52,6 +55,7 @@ impl WsClient {
             models: vec![],
             ram_mb: 0,
             has_gpu: false,
+            layer_range: None,
         };
         let msg = serde_json::to_string(&reg)?;
         sink.send(Message::Text(msg.into())).await?;

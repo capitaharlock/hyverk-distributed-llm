@@ -2,15 +2,15 @@
 // Accepts persistent connections from clients.
 // Routes inference requests through node chains.
 
-use axum::extract::ws::{WebSocket, WebSocketUpgrade, Message};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
-use hyverk_comms::messages::{ClientMessage, CoordinatorMessage};
 use futures_util::{SinkExt, StreamExt};
+use hyverk_comms::messages::{ClientMessage, CoordinatorMessage};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
-use tracing::{info, warn, error};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{error, info, warn};
 
 /// Connected WebSocket node
 pub struct WsNode {
@@ -103,7 +103,8 @@ pub fn node_layer_range(node_name: &str) -> (usize, usize) {
 /// Only includes nodes whose state is "ready". Returns empty if cluster is incomplete.
 pub async fn build_inference_chain(ws_state: &WsState) -> Vec<ChainStep> {
     let nodes = ws_state.nodes.read().await;
-    let mut steps: Vec<ChainStep> = nodes.values()
+    let mut steps: Vec<ChainStep> = nodes
+        .values()
         .filter(|node| node.state == "ready")
         .map(|node| {
             let (start, end) = node_layer_range(&node.node_name);
@@ -113,7 +114,8 @@ pub async fn build_inference_chain(ws_state: &WsState) -> Vec<ChainStep> {
                 layer_end: end,
                 is_last: end >= 28,
             }
-        }).collect();
+        })
+        .collect();
     steps.sort_by_key(|s| s.layer_start);
     steps.dedup_by_key(|s| s.layer_start);
     steps
@@ -135,7 +137,8 @@ pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
     }
     node_states.sort_by_key(|n| n.layer_start);
 
-    let ready_nodes: Vec<&NodeInferenceState> = node_states.iter().filter(|n| n.state == "ready").collect();
+    let ready_nodes: Vec<&NodeInferenceState> =
+        node_states.iter().filter(|n| n.state == "ready").collect();
     let all_ready = node_states.iter().all(|n| n.state == "ready") && !node_states.is_empty();
 
     // Check full layer coverage
@@ -146,7 +149,7 @@ pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
         // Check no gaps
         let mut no_gaps = true;
         for i in 1..ready_nodes.len() {
-            if ready_nodes[i].layer_start > ready_nodes[i-1].layer_end {
+            if ready_nodes[i].layer_start > ready_nodes[i - 1].layer_end {
                 no_gaps = false;
                 break;
             }
@@ -162,7 +165,10 @@ pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
         "forming".to_string()
     };
 
-    ClusterStatus { status, nodes: node_states }
+    ClusterStatus {
+        status,
+        nodes: node_states,
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -199,21 +205,21 @@ async fn handle_ws(socket: WebSocket, state: Arc<WsState>) {
     // Spawn task to forward messages from channel to WebSocket
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if sink.send(msg).await.is_err() { break; }
+            if sink.send(msg).await.is_err() {
+                break;
+            }
         }
     });
 
     // Receive messages from client
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
-            Message::Text(text) => {
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(client_msg) => {
-                        handle_client_message(&state, &node_id, client_msg, &tx).await;
-                    }
-                    Err(e) => warn!(node = %node_id, "Bad message: {e}"),
+            Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                Ok(client_msg) => {
+                    handle_client_message(&state, &node_id, client_msg, &tx).await;
                 }
-            }
+                Err(e) => warn!(node = %node_id, "Bad message: {e}"),
+            },
             Message::Binary(data) => {
                 // Binary = hidden states from inference forward
                 handle_binary_data(&state, &node_id, data.to_vec()).await;
@@ -239,7 +245,14 @@ async fn handle_client_message(
     tx: &mpsc::UnboundedSender<Message>,
 ) {
     match msg {
-        ClientMessage::Register { node_name, hardware_info, models, ram_mb, has_gpu } => {
+        ClientMessage::Register {
+            node_name,
+            hardware_info,
+            models,
+            ram_mb,
+            has_gpu,
+            layer_range,
+        } => {
             let node = WsNode {
                 node_id: node_id.to_string(),
                 node_name: node_name.clone(),
@@ -250,9 +263,15 @@ async fn handle_client_message(
                 tx: tx.clone(),
             };
             state.nodes.write().await.insert(node_id.to_string(), node);
-            info!(node_id, name = %node_name, gpu = has_gpu, ram = ram_mb, "WS node registered");
+            let layers_info = layer_range
+                .map(|(s, e)| format!("{}-{}", s, e))
+                .unwrap_or_else(|| "none".to_string());
+            info!(node_id, name = %node_name, gpu = has_gpu, ram = ram_mb, layers = %layers_info, "WS node registered");
         }
-        ClientMessage::StateUpdate { state: node_state, detail } => {
+        ClientMessage::StateUpdate {
+            state: node_state,
+            detail,
+        } => {
             let mut nodes = state.nodes.write().await;
             if let Some(node) = nodes.get_mut(node_id) {
                 info!(node_id, name = %node.node_name, state = %node_state, detail = %detail, "Node state update");
@@ -260,15 +279,27 @@ async fn handle_client_message(
                 node.state_detail = detail;
             }
         }
-        ClientMessage::Heartbeat { active_tasks, current_role, .. } => {
+        ClientMessage::Heartbeat {
+            active_tasks,
+            current_role,
+            ..
+        } => {
             // Update node status
         }
-        ClientMessage::ForwardResult { request_id, hidden_states: _, shape: _ } => {
+        ClientMessage::ForwardResult {
+            request_id,
+            hidden_states: _,
+            shape: _,
+        } => {
             // Text-only signal: actual hidden states arrive as binary frame.
             // Do NOT route here — handle_binary_data does the routing.
             info!(request_id = %request_id, "ForwardResult text received (awaiting binary)");
         }
-        ClientMessage::TokenGenerated { request_id, token_id, is_eos } => {
+        ClientMessage::TokenGenerated {
+            request_id,
+            token_id,
+            is_eos,
+        } => {
             info!(request_id = %request_id, token_id, eos = is_eos, "Token generated");
             handle_generated_token(state, &request_id, token_id, is_eos).await;
         }
@@ -334,13 +365,17 @@ async fn handle_generated_token(
         if is_eos || pending.generated.len() >= pending.max_tokens {
             // Complete — send result
             if let Some(tx) = pending.result_tx.take() {
-                let cluster_info: Vec<serde_json::Value> = pending.chain.iter().map(|s| {
-                    serde_json::json!({
-                        "node": s.node_id,
-                        "layers": format!("{}-{}", s.layer_start, s.layer_end),
-                        "position": if s.is_last { "last" } else { "first/middle" },
+                let cluster_info: Vec<serde_json::Value> = pending
+                    .chain
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "node": s.node_id,
+                            "layers": format!("{}-{}", s.layer_start, s.layer_end),
+                            "position": if s.is_last { "last" } else { "first/middle" },
+                        })
                     })
-                }).collect();
+                    .collect();
 
                 tx.send(InferenceResult {
                     text: String::new(), // decoded by caller
@@ -348,7 +383,8 @@ async fn handle_generated_token(
                     elapsed_secs: 0.0,
                     cluster: cluster_info,
                     generated_ids: pending.generated.clone(),
-                }).ok();
+                })
+                .ok();
             }
         } else {
             // Need more tokens — restart chain from first node

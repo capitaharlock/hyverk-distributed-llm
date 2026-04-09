@@ -33,7 +33,7 @@ pub enum CoordinatorMessage {
     },
     /// Switch role
     SwitchRole {
-        role: String, // "trainer" or "executor"
+        role: String,    // "trainer" or "executor"
         urgency: String, // "graceful" or "immediate"
     },
     /// Keepalive
@@ -51,6 +51,7 @@ pub enum ClientMessage {
         models: Vec<String>,
         ram_mb: u64,
         has_gpu: bool,
+        layer_range: Option<(u32, u32)>,
     },
     /// Status heartbeat
     Heartbeat {
@@ -79,10 +80,7 @@ pub enum ClientMessage {
         is_eos: bool,
     },
     /// Node state update (downloading, ready, error, processing)
-    StateUpdate {
-        state: String,
-        detail: String,
-    },
+    StateUpdate { state: String, detail: String },
     /// Keepalive response
     Pong,
 }
