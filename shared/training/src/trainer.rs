@@ -14,15 +14,27 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use tokenizers::Tokenizer;
 use tracing::{info, warn};
 
-/// Get current process RSS (resident set size) in bytes on macOS.
+/// Get current process RSS (resident set size) in bytes.
 fn current_rss_bytes() -> u64 {
-    let usage = unsafe {
-        let mut info: libc::rusage = std::mem::zeroed();
-        libc::getrusage(libc::RUSAGE_SELF, &mut info);
-        info
-    };
-    // ru_maxrss is in bytes on macOS
-    usage.ru_maxrss as u64
+    #[cfg(unix)]
+    {
+        let usage = unsafe {
+            let mut info: libc::rusage = std::mem::zeroed();
+            libc::getrusage(libc::RUSAGE_SELF, &mut info);
+            info
+        };
+        // ru_maxrss is in bytes on macOS, kilobytes on Linux
+        #[cfg(target_os = "macos")]
+        return usage.ru_maxrss as u64;
+        #[cfg(not(target_os = "macos"))]
+        return (usage.ru_maxrss as u64) * 1024;
+    }
+    #[cfg(windows)]
+    {
+        // On Windows, return 0 to effectively disable memory checks
+        // Alternative: could use Windows API (GetProcessMemoryInfo) but requires additional dependencies
+        0
+    }
 }
 
 /// Hard memory guard. Returns Err if RSS exceeds the limit — training loop catches this and exits cleanly.
