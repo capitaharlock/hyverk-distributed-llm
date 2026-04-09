@@ -123,6 +123,24 @@ api_key = "gsk_..."
 model = "llama-3.3-70b-versatile"
 ```
 
+## Encrypted Files
+
+Some directories (`_rjj/`) are encrypted via [git-crypt](https://github.com/AGWA/git-crypt). They appear as binary blobs without the decryption key.
+
+**To decrypt (authorized contributors only):**
+
+```bash
+# Install git-crypt
+brew install git-crypt          # macOS
+scoop install git-crypt         # Windows
+sudo apt install git-crypt      # Linux
+
+# Unlock after cloning
+git-crypt unlock /path/to/hyverk-git-crypt-key
+```
+
+The key file is distributed privately to authorized team members.
+
 ## License
 
 MIT
