@@ -31,6 +31,11 @@ pub enum CoordinatorMessage {
         layer_end: usize,
         is_last: bool,
     },
+    /// Assign layers to this node (sent after GPU node registers)
+    LayerAssignment {
+        layer_start: usize,
+        layer_end: usize,
+    },
     /// Switch role
     SwitchRole {
         role: String,    // "trainer" or "executor"

@@ -24,57 +24,24 @@ pub async fn run_ws_worker(
         .replace("http://", "ws://");
     let ws_url = format!("{}/ws", ws_url.trim_end_matches('/'));
 
-    // GPU nodes use GGUF+llama.cpp for full inference, CPU nodes use distributed PyTorch layers
-    let use_distributed_inference = !has_gpu;
-
-    let (layer_start, layer_end) =
-        if node_name.contains("node-2") || node_name.contains("fly-node-iad-2") {
-            (14, 28) // node-2: layers 14-27 + norm + lm_head
-        } else {
-            (0, 14) // node-1: embed + layers 0-13
-        };
-
-    let layer_cache = format!("{}/inference_layers_{layer_start}_{layer_end}", model_dir);
     let coordinator_http = coordinator_url
         .replace("wss://", "https://")
         .replace("ws://", "http://")
         .replace("/ws", "");
 
+    // Layer assignment comes from coordinator dynamically after registration.
+    let assigned_layers = std::sync::Arc::new(tokio::sync::RwLock::new(None::<(usize, usize)>));
+    let model_dir = model_dir.to_string();
+    let coordinator_http = coordinator_http.to_string();
+
     // Track whether layers are ready (persists across reconnections)
     let layers_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let download_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if use_distributed_inference {
-        // CPU nodes: download PyTorch layers for distributed inference
-        info!(layers = format!("{layer_start}-{layer_end}"), cache = %layer_cache, "Downloading assigned layers...");
-        let mut download_ok = false;
-        for attempt in 1..=3 {
-            match download_layers(&layer_cache, &coordinator_http, layer_start, layer_end).await {
-                Ok(()) => {
-                    info!("Layer weights ready (attempt {attempt})");
-                    layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                    download_ok = true;
-                    break;
-                }
-                Err(e) => {
-                    warn!("Layer download failed (attempt {attempt}/3): {e}");
-                    if attempt < 3 {
-                        info!("Retrying download in 10s...");
-                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    }
-                }
-            }
-        }
-        if !download_ok {
-            error!("Layer download failed after 3 attempts — inference will not work on this node");
-            download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    } else {
-        // GPU nodes: skip layer download, use GGUF+llama.cpp for full inference
-        info!(
-            "GPU node detected — using GGUF+llama.cpp for full inference (skipping layer download)"
-        );
+    // CPU nodes report ready immediately (training/synthesis only, no inference)
+    if !has_gpu {
         layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        info!("CPU node — training/synthesis only, no inference layers needed");
     }
 
     loop {
@@ -83,7 +50,7 @@ pub async fn run_ws_worker(
                 info!("WS worker shutting down");
                 break;
             }
-            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &layer_cache, &layers_ready, &download_failed, &shutdown) => {
+            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &model_dir, &coordinator_http, &assigned_layers, &layers_ready, &download_failed, &shutdown) => {
                 match result {
                     Ok(()) => info!("WS connection closed cleanly"),
                     Err(e) => warn!("WS connection error: {e}"),
@@ -103,6 +70,8 @@ async fn connect_and_run(
     has_gpu: bool,
     ram_mb: u64,
     model_dir: &str,
+    coordinator_http: &str,
+    assigned_layers: &std::sync::Arc<tokio::sync::RwLock<Option<(usize, usize)>>>,
     layers_ready: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     download_failed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     shutdown: &tokio_util::sync::CancellationToken,
@@ -112,47 +81,27 @@ async fn connect_and_run(
     let (ws, _) = connect_async(ws_url).await?;
     let (mut sink, mut stream) = ws.split();
 
-    // Determine layer range based on node type
-    let layer_range = if has_gpu {
-        Some((0, 28)) // GPU nodes handle full model with GGUF+llama.cpp
-    } else {
-        // CPU nodes get assigned range based on name
-        if node_name.contains("node-2") || node_name.contains("fly-node-iad-2") {
-            Some((14, 28))
-        } else {
-            Some((0, 14))
-        }
-    };
-
-    // Register
+    // Register — coordinator will send LayerAssignment for GPU nodes
     let reg = ClientMessage::Register {
         node_name: node_name.to_string(),
         hardware_info: hardware_info.to_string(),
         models: vec![],
         ram_mb,
         has_gpu,
-        layer_range,
+        layer_range: None, // coordinator assigns dynamically
     };
     sink.send(Message::Text(serde_json::to_string(&reg)?.into()))
         .await?;
 
-    // Report current state
-    let current_state = if layers_ready.load(std::sync::atomic::Ordering::SeqCst) {
-        ("ready".to_string(), "Layer weights loaded".to_string())
-    } else if download_failed.load(std::sync::atomic::Ordering::SeqCst) {
-        (
-            "error".to_string(),
-            "Layer download failed after 3 attempts".to_string(),
-        )
+    // Report initial state
+    let initial_state = if layers_ready.load(std::sync::atomic::Ordering::SeqCst) {
+        ("ready".to_string(), if has_gpu { "GPU node — waiting for layer assignment".to_string() } else { "CPU node — training/synthesis only".to_string() })
     } else {
-        (
-            "downloading".to_string(),
-            "Downloading model layers".to_string(),
-        )
+        ("connecting".to_string(), "Waiting for layer assignment from coordinator".to_string())
     };
     let state_msg = ClientMessage::StateUpdate {
-        state: current_state.0,
-        detail: current_state.1,
+        state: initial_state.0,
+        detail: initial_state.1,
     };
     sink.send(Message::Text(serde_json::to_string(&state_msg)?.into()))
         .await?;
@@ -172,7 +121,42 @@ async fn connect_and_run(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<CoordinatorMessage>(&text) {
                             Ok(coord_msg) => {
-                                if let Some(response) = handle_coordinator_message(coord_msg, model_dir).await {
+                                // Handle LayerAssignment from coordinator
+                                if let CoordinatorMessage::LayerAssignment { layer_start, layer_end } = &coord_msg {
+                                    info!(layers = format!("{layer_start}-{layer_end}"), "Received layer assignment from coordinator");
+                                    let ls = *layer_start;
+                                    let le = *layer_end;
+                                    *assigned_layers.write().await = Some((ls, le));
+
+                                    let dl_msg = ClientMessage::StateUpdate {
+                                        state: "downloading".to_string(),
+                                        detail: format!("Downloading layers {ls}-{le}"),
+                                    };
+                                    let _ = sink.send(Message::Text(serde_json::to_string(&dl_msg).unwrap_or_default().into())).await;
+
+                                    let cache = format!("{model_dir}/inference_layers_{ls}_{le}");
+                                    let mut ok = false;
+                                    for attempt in 1..=3 {
+                                        match download_layers(&cache, coordinator_http, ls, le).await {
+                                            Ok(()) => { info!("Layer weights ready (attempt {attempt})"); layers_ready.store(true, std::sync::atomic::Ordering::SeqCst); ok = true; break; }
+                                            Err(e) => { warn!("Layer download failed (attempt {attempt}/3): {e}"); if attempt < 3 { tokio::time::sleep(std::time::Duration::from_secs(10)).await; } }
+                                        }
+                                    }
+                                    let state_msg = if ok {
+                                        ClientMessage::StateUpdate { state: "ready".to_string(), detail: format!("Layers {ls}-{le} loaded") }
+                                    } else {
+                                        download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        ClientMessage::StateUpdate { state: "error".to_string(), detail: "Layer download failed".to_string() }
+                                    };
+                                    let _ = sink.send(Message::Text(serde_json::to_string(&state_msg).unwrap_or_default().into())).await;
+                                    continue;
+                                }
+
+                                let current_model_dir = if let Some((ls, le)) = *assigned_layers.read().await {
+                                    format!("{model_dir}/inference_layers_{ls}_{le}")
+                                } else { model_dir.to_string() };
+
+                                if let Some(response) = handle_coordinator_message(coord_msg, &current_model_dir).await {
                                     match response {
                                         WsResponse::Text(msg) => {
                                             sink.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
@@ -192,7 +176,10 @@ async fn connect_and_run(
                     }
                     Some(Ok(Message::Binary(data))) => {
                         // Binary = hidden states for inference forward
-                        if let Some(response) = handle_binary_forward(data.to_vec(), model_dir).await {
+                        let bin_model_dir = if let Some((ls, le)) = *assigned_layers.read().await {
+                            format!("{model_dir}/inference_layers_{ls}_{le}")
+                        } else { model_dir.to_string() };
+                        if let Some(response) = handle_binary_forward(data.to_vec(), &bin_model_dir).await {
                             match response {
                                 WsResponse::Text(msg) => {
                                     sink.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;

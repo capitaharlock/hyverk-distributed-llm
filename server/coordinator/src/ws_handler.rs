@@ -90,43 +90,59 @@ impl WsState {
     }
 }
 
-/// Determine layer range from node name (mirrors ws_worker.rs logic)
-pub fn node_layer_range(node_name: &str) -> (usize, usize) {
-    if node_name.contains("node-2") || node_name.contains("fly-node-iad-2") {
-        (14, 28) // node-2: layers 14-27 + norm + lm_head
-    } else {
-        (0, 14) // node-1: embed + layers 0-13
+/// Dynamically assign layers to GPU nodes for inference.
+/// Only GPU nodes participate in inference clusters.
+/// Layers split evenly among available GPU nodes, sorted by name for determinism.
+pub fn assign_gpu_layers(gpu_nodes: &[&WsNode]) -> Vec<(String, usize, usize)> {
+    if gpu_nodes.is_empty() { return vec![]; }
+    let total_layers: usize = 28;
+    let n = gpu_nodes.len();
+    let per_node = total_layers / n;
+    let remainder = total_layers % n;
+    let mut assignments = Vec::new();
+    let mut start = 0;
+    for (i, node) in gpu_nodes.iter().enumerate() {
+        let extra = if i < remainder { 1 } else { 0 };
+        let end = start + per_node + extra;
+        assignments.push((node.node_id.clone(), start, end));
+        start = end;
     }
+    assignments
 }
 
-/// Build inference chain from currently connected WS nodes that are "ready".
-/// Only includes nodes whose state is "ready". Returns empty if cluster is incomplete.
+/// Build inference chain from currently connected GPU nodes that are "ready".
+/// CPU nodes are excluded from inference — they do training/synthesis only.
 pub async fn build_inference_chain(ws_state: &WsState) -> Vec<ChainStep> {
     let nodes = ws_state.nodes.read().await;
-    let mut steps: Vec<ChainStep> = nodes
-        .values()
-        .filter(|node| node.state == "ready")
-        .map(|node| {
-            let (start, end) = node_layer_range(&node.node_name);
-            ChainStep {
-                node_id: node.node_id.clone(),
-                layer_start: start,
-                layer_end: end,
-                is_last: end >= 28,
-            }
-        })
+    let mut gpu_nodes: Vec<&WsNode> = nodes.values()
+        .filter(|node| node.state == "ready" && node.has_gpu)
         .collect();
-    steps.sort_by_key(|s| s.layer_start);
-    steps.dedup_by_key(|s| s.layer_start);
-    steps
+    gpu_nodes.sort_by_key(|n| &n.node_name);
+    let assignments = assign_gpu_layers(&gpu_nodes);
+    assignments.iter().map(|(node_id, start, end)| {
+        ChainStep {
+            node_id: node_id.clone(),
+            layer_start: *start,
+            layer_end: *end,
+            is_last: *end >= 28,
+        }
+    }).collect()
 }
 
-/// Check if the inference cluster is complete (all layers 0-28 covered by ready nodes).
+/// Check if the inference cluster is complete (all layers 0-28 covered by ready GPU nodes).
 pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
     let nodes = ws_state.nodes.read().await;
     let mut node_states: Vec<NodeInferenceState> = Vec::new();
+
+    // GPU nodes get dynamic layer assignments; CPU nodes show 0-0 (no inference)
+    let mut gpu_nodes: Vec<&WsNode> = nodes.values().filter(|n| n.has_gpu).collect();
+    gpu_nodes.sort_by_key(|n| &n.node_name);
+    let gpu_assignments = assign_gpu_layers(&gpu_nodes);
+    let gpu_map: std::collections::HashMap<String, (usize, usize)> = gpu_assignments
+        .iter().map(|(id, s, e)| (id.clone(), (*s, *e))).collect();
+
     for node in nodes.values() {
-        let (start, end) = node_layer_range(&node.node_name);
+        let (start, end) = gpu_map.get(&node.node_id).copied().unwrap_or((0, 0));
         node_states.push(NodeInferenceState {
             node_name: node.node_name.clone(),
             state: node.state.clone(),
@@ -137,19 +153,19 @@ pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
     }
     node_states.sort_by_key(|n| n.layer_start);
 
-    let ready_nodes: Vec<&NodeInferenceState> =
-        node_states.iter().filter(|n| n.state == "ready").collect();
-    let all_ready = node_states.iter().all(|n| n.state == "ready") && !node_states.is_empty();
+    let ready_gpu: Vec<&NodeInferenceState> = node_states.iter()
+        .filter(|n| n.state == "ready" && n.layer_end > 0)
+        .collect();
+    let all_gpu_ready = !ready_gpu.is_empty() && gpu_nodes.iter().all(|n| n.state == "ready");
 
-    // Check full layer coverage
+    // Check full layer coverage from GPU nodes only
     let mut covered = false;
-    if !ready_nodes.is_empty() {
-        let starts_at_zero = ready_nodes.first().map_or(false, |n| n.layer_start == 0);
-        let ends_at_28 = ready_nodes.last().map_or(false, |n| n.layer_end >= 28);
-        // Check no gaps
+    if !ready_gpu.is_empty() {
+        let starts_at_zero = ready_gpu.first().map_or(false, |n| n.layer_start == 0);
+        let ends_at_28 = ready_gpu.last().map_or(false, |n| n.layer_end >= 28);
         let mut no_gaps = true;
-        for i in 1..ready_nodes.len() {
-            if ready_nodes[i].layer_start > ready_nodes[i - 1].layer_end {
+        for i in 1..ready_gpu.len() {
+            if ready_gpu[i].layer_start > ready_gpu[i - 1].layer_end {
                 no_gaps = false;
                 break;
             }
@@ -157,7 +173,7 @@ pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
         covered = starts_at_zero && ends_at_28 && no_gaps;
     }
 
-    let status = if covered && all_ready {
+    let status = if covered && all_gpu_ready {
         "operational".to_string()
     } else if node_states.is_empty() {
         "no_nodes".to_string()
@@ -267,6 +283,22 @@ async fn handle_client_message(
                 .map(|(s, e)| format!("{}-{}", s, e))
                 .unwrap_or_else(|| "none".to_string());
             info!(node_id, name = %node_name, gpu = has_gpu, ram = ram_mb, layers = %layers_info, "WS node registered");
+
+            // GPU node registered: recalculate and broadcast layer assignments to all GPU nodes
+            if has_gpu {
+                let nodes = state.nodes.read().await;
+                let mut gpu_nodes: Vec<&WsNode> = nodes.values().filter(|n| n.has_gpu).collect();
+                gpu_nodes.sort_by_key(|n| &n.node_name);
+                let assignments = assign_gpu_layers(&gpu_nodes);
+                for (nid, start, end) in &assignments {
+                    if let Some(n) = nodes.get(nid.as_str()) {
+                        let msg = CoordinatorMessage::LayerAssignment { layer_start: *start, layer_end: *end };
+                        let json = serde_json::to_string(&msg).unwrap_or_default();
+                        let _ = n.tx.send(Message::Text(json.into()));
+                        info!(node_id = %nid, name = %n.node_name, layers = format!("{start}-{end}"), "Sent layer assignment");
+                    }
+                }
+            }
         }
         ClientMessage::StateUpdate {
             state: node_state,
