@@ -1,0 +1,4 @@
+_rjj/** filter=git-crypt diff=git-crypt
+_rjj/**/* filter=git-crypt diff=git-crypt
+.env filter=git-crypt diff=git-crypt
+.env.* filter=git-crypt diff=git-crypt

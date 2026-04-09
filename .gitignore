@@ -7,8 +7,8 @@ client/desktop/node_modules/
 electron/dist/
 electron/out/
 
-# Private context, deploy, infra (NEVER commit)
-_rjj/
+# Private context — encrypted via git-crypt (visible only with key)
+# _rjj/ is tracked but encrypted
 
 # Deploy configs (Fly.io, Docker, entrypoints, platform scripts)
 clients/
