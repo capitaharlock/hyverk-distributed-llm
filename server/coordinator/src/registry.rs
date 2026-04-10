@@ -42,7 +42,17 @@ impl NodeRegistry {
             last_heartbeat: now,
             registered_at: now,
         };
-        self.nodes.write().await.insert(node_id.clone(), info);
+        // Remove any existing node with the same name (prevents duplicates on reconnect)
+        let mut nodes = self.nodes.write().await;
+        let old_ids: Vec<String> = nodes.iter()
+            .filter(|(_, n)| n.node_name == node_name)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for old_id in &old_ids {
+            nodes.remove(old_id);
+            info!(old_node_id = %old_id, name = %node_name, "Removed stale registration");
+        }
+        nodes.insert(node_id.clone(), info);
         info!(node_id = %node_id, name = %node_name, "Node registered");
         node_id
     }

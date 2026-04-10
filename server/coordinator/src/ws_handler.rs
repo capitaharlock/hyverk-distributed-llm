@@ -278,7 +278,16 @@ async fn handle_client_message(
                 state_detail: String::new(),
                 tx: tx.clone(),
             };
-            state.nodes.write().await.insert(node_id.to_string(), node);
+            // Remove stale entries with same name (prevents duplicates on reconnect)
+            {
+                let mut nodes = state.nodes.write().await;
+                let stale: Vec<String> = nodes.iter()
+                    .filter(|(id, n)| n.node_name == node_name && id.as_str() != node_id)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in stale { nodes.remove(&id); }
+                nodes.insert(node_id.to_string(), node);
+            }
             let layers_info = layer_range
                 .map(|(s, e)| format!("{}-{}", s, e))
                 .unwrap_or_else(|| "none".to_string());
