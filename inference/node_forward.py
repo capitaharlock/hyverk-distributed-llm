@@ -24,7 +24,7 @@ except ImportError as e:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", required=True, choices=["download","embed","forward","generate"])
+    p.add_argument("--mode", required=True, choices=["download","embed","forward","generate","serve"])
     p.add_argument("--model-dir", required=True, help="Local dir for cached layer weights")
     p.add_argument("--coordinator", default="https://hyverk-coordinator.fly.dev")
     p.add_argument("--layer-start", type=int, default=0)
@@ -32,10 +32,13 @@ def main():
     p.add_argument("--input-file", default="", help="Input hidden states (binary torch tensor)")
     p.add_argument("--output-file", default="", help="Output hidden states")
     p.add_argument("--token-ids", default="", help="Comma-separated token IDs for embed mode")
+    p.add_argument("--port", type=int, default=18100, help="Port for serve mode")
     args = p.parse_args()
 
     if args.mode == "download":
         download_layers(args)
+    elif args.mode == "serve":
+        serve_model(args)
     elif args.mode == "embed":
         embed_tokens(args)
     elif args.mode == "forward":
@@ -181,6 +184,105 @@ def load_model_layers(args):
 
     return config, device, rotary, layers, embed, norm, lm_head
 
+def serve_model(args):
+    """Persistent HTTP server — loads model once, handles requests via HTTP."""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import struct
+
+    print(f"Loading model layers {args.layer_start}-{args.layer_end}...", file=sys.stderr)
+    t0 = time.time()
+    config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
+    print(f"Model loaded in {time.time()-t0:.1f}s on {device}", file=sys.stderr)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *a): pass  # suppress logs
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            req = json.loads(body)
+            mode = req.get("mode", "forward")
+
+            t0 = time.time()
+            try:
+                if mode == "embed":
+                    token_ids = req["token_ids"]
+                    ids = torch.tensor([token_ids], device=device, dtype=torch.long)
+                    hidden = embed(ids)
+                    seq_len = hidden.shape[1]
+                    position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+                    pos_emb = rotary(hidden, position_ids)
+                    with torch.no_grad():
+                        for layer in layers:
+                            out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
+                            hidden = out[0] if isinstance(out, tuple) else out
+                    data = hidden.cpu().half().numpy().tobytes()
+                    shape = list(hidden.shape)
+                    elapsed = time.time() - t0
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("X-Shape", json.dumps(shape))
+                    self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                elif mode in ("forward", "generate"):
+                    # Hidden states come as raw bytes in request body after JSON header
+                    hidden_b64 = req.get("hidden_states")
+                    import base64
+                    raw = base64.b64decode(hidden_b64)
+                    shape = req["shape"]
+                    import numpy as np
+                    arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
+                    hidden = torch.from_numpy(arr.copy()).to(device)
+
+                    seq_len = hidden.shape[1]
+                    position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+                    pos_emb = rotary(hidden, position_ids)
+                    with torch.no_grad():
+                        for layer in layers:
+                            out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
+                            hidden = out[0] if isinstance(out, tuple) else out
+                        if mode == "generate" and norm:
+                            hidden = norm(hidden)
+
+                    if mode == "generate" and lm_head:
+                        logits = lm_head.float()(hidden.float())
+                        token_id = int(torch.argmax(logits[0, -1]).item())
+                        elapsed = time.time() - t0
+                        resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp)))
+                        self.end_headers()
+                        self.wfile.write(resp)
+                    else:
+                        data = hidden.cpu().half().numpy().tobytes()
+                        shape = list(hidden.shape)
+                        elapsed = time.time() - t0
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("X-Shape", json.dumps(shape))
+                        self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+
+            except Exception as e:
+                err = json.dumps({"error": str(e)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+
+    server = HTTPServer(("127.0.0.1", args.port), Handler)
+    print(json.dumps({"status": "ready", "port": args.port, "device": str(device), "layers": f"{args.layer_start}-{args.layer_end}"}))
+    sys.stdout.flush()
+    print(f"Serving on http://127.0.0.1:{args.port}", file=sys.stderr)
+    server.serve_forever()
+
 def embed_tokens(args):
     """First node: embed token IDs, forward through layers, save hidden states"""
     config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
@@ -194,7 +296,8 @@ def embed_tokens(args):
 
     with torch.no_grad():
         for layer in layers:
-            hidden = layer(hidden, position_embeddings=position_embeddings, use_cache=False)
+            out = layer(hidden, position_embeddings=position_embeddings, use_cache=False)
+            hidden = out[0] if isinstance(out, tuple) else out
 
     # Save hidden states
     torch.save(hidden.cpu().half(), args.output_file)
@@ -211,7 +314,8 @@ def forward_layers(args):
 
     with torch.no_grad():
         for layer in layers:
-            hidden = layer(hidden, position_embeddings=position_embeddings, use_cache=False)
+            out = layer(hidden, position_embeddings=position_embeddings, use_cache=False)
+            hidden = out[0] if isinstance(out, tuple) else out
 
     torch.save(hidden.cpu().half(), args.output_file)
     print(json.dumps({"shape": list(hidden.shape), "size": os.path.getsize(args.output_file)}))
@@ -227,7 +331,8 @@ def generate_token(args):
 
     with torch.no_grad():
         for layer in layers:
-            hidden = layer(hidden, position_embeddings=position_embeddings, use_cache=False)
+            out = layer(hidden, position_embeddings=position_embeddings, use_cache=False)
+            hidden = out[0] if isinstance(out, tuple) else out
         if norm: hidden = norm(hidden)
         if lm_head:
             logits = lm_head.float()(hidden.float())

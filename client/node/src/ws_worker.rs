@@ -158,7 +158,17 @@ async fn connect_and_run(
                                         }
                                     }
                                     let state_msg = if ok {
-                                        ClientMessage::StateUpdate { state: "ready".to_string(), detail: format!("Layers {ls}-{le} loaded") }
+                                        // Start persistent inference server
+                                        info!("Starting inference server for layers {ls}-{le}");
+                                        match start_inference_server(&cache, ls, le, 18100).await {
+                                            Ok(_child) => {
+                                                info!("Inference server running on port 18100");
+                                                // Wait a moment for server to be fully ready
+                                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                            }
+                                            Err(e) => warn!("Failed to start inference server: {e}"),
+                                        }
+                                        ClientMessage::StateUpdate { state: "ready".to_string(), detail: format!("Layers {ls}-{le} loaded, inference server running") }
                                     } else {
                                         download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
                                         ClientMessage::StateUpdate { state: "error".to_string(), detail: "Layer download failed".to_string() }
@@ -408,8 +418,122 @@ fn parse_layer_range(model_dir: &str) -> (usize, usize) {
     }
 }
 
-/// Call Python to run forward pass on assigned layers
+/// Start the persistent Python inference server (loads model once, serves via HTTP)
+async fn start_inference_server(
+    model_dir: &str,
+    layer_start: usize,
+    layer_end: usize,
+    port: u16,
+) -> Result<tokio::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+    let script = find_script("inference/node_forward.py");
+    let python = find_python();
+
+    info!(port, layers = format!("{layer_start}-{layer_end}"), "Starting persistent inference server");
+
+    let mut child = tokio::process::Command::new(&python)
+        .arg(&script)
+        .arg("--mode").arg("serve")
+        .arg("--model-dir").arg(model_dir)
+        .arg("--layer-start").arg(layer_start.to_string())
+        .arg("--layer-end").arg(layer_end.to_string())
+        .arg("--port").arg(port.to_string())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start inference server: {e}"))?;
+
+    // Wait for "ready" on stdout
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line),
+    ).await
+        .map_err(|_| "Inference server startup timed out (120s)")?
+        .map_err(|e| format!("Failed to read server stdout: {e}"))?;
+
+    info!("Inference server ready: {}", line.trim());
+    Ok(child)
+}
+
+/// Call the persistent inference server via HTTP
 async fn run_layer_forward(
+    model_dir: &str,
+    token_ids: &[u32],
+    layer_start: usize,
+    layer_end: usize,
+    is_first: bool,
+) -> Result<(Vec<u8>, Vec<usize>), Box<dyn std::error::Error + Send + Sync>> {
+    let port = 18100u16;
+    let url = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+
+    if is_first {
+        // Embed mode: send token IDs, get hidden states back
+        let resp = client.post(&url)
+            .json(&serde_json::json!({"mode": "embed", "token_ids": token_ids}))
+            .send().await
+            .map_err(|e| format!("Inference server unreachable: {e}. Is it running?"))?;
+
+        let shape_str = resp.headers().get("X-Shape")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("[]").to_string();
+        let shape: Vec<usize> = serde_json::from_str(&shape_str).unwrap_or_default();
+        let hidden_data = resp.bytes().await?.to_vec();
+        Ok((hidden_data, shape))
+    } else {
+        // Forward/generate: send hidden states, get result back
+        // Hidden states are in a file — read it
+        let input_file = format!("/tmp/hyverk_ws_in_{}.bin", layer_start);
+        let hidden_bytes = std::fs::read(&input_file)
+            .map_err(|e| format!("Can't read hidden states: {e}"))?;
+
+        let (layer_start, layer_end) = parse_layer_range(model_dir);
+        let is_last = layer_end >= 28;
+        let mode = if is_last { "generate" } else { "forward" };
+
+        // Encode as base64 for JSON transport
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&hidden_bytes);
+
+        // Parse shape from the binary data (first 4 bytes = ndim, then dims)
+        // Actually the hidden states are raw f16 numpy from torch.save — we need to figure out shape
+        // For now assume shape from the WS metadata
+        let hidden_size = 3584usize; // Qwen2.5-7B hidden size
+        let seq_len = hidden_bytes.len() / (hidden_size * 2); // f16 = 2 bytes
+        let shape = vec![1, seq_len, hidden_size];
+
+        let resp = client.post(&url)
+            .json(&serde_json::json!({
+                "mode": mode,
+                "hidden_states": b64,
+                "shape": shape,
+            }))
+            .send().await
+            .map_err(|e| format!("Inference server error: {e}"))?;
+
+        if is_last {
+            // Generate mode: response is JSON with token_id
+            let result: serde_json::Value = resp.json().await?;
+            // Return empty hidden data + token_id encoded in shape
+            let token_id = result["token_id"].as_u64().unwrap_or(0) as usize;
+            Ok((vec![], vec![token_id]))
+        } else {
+            let shape_str = resp.headers().get("X-Shape")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("[]").to_string();
+            let shape: Vec<usize> = serde_json::from_str(&shape_str).unwrap_or_default();
+            let hidden_data = resp.bytes().await?.to_vec();
+            Ok((hidden_data, shape))
+        }
+    }
+}
+
+/// Legacy: Call Python subprocess (used only for download)
+async fn run_layer_forward_subprocess(
     model_dir: &str,
     token_ids: &[u32],
     layer_start: usize,
