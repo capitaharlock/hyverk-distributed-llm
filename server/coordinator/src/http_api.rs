@@ -1327,7 +1327,7 @@ async fn tokenize_prompt(prompt: &str) -> Result<Vec<u32>, String> {
     let script = r#"
 import sys, json
 from tokenizers import Tokenizer
-t = Tokenizer.from_file('/app/tokenizer.json')
+t = Tokenizer.from_file('/data/tokenizer.json' if __import__('os').path.exists('/data/tokenizer.json') else '/app/tokenizer.json')
 enc = t.encode(sys.argv[1])
 print(json.dumps(enc.ids))
 "#;
@@ -1365,7 +1365,7 @@ async fn decode_tokens(ids: &[u32]) -> Result<String, String> {
     let script = r#"
 import sys, json
 from tokenizers import Tokenizer
-t = Tokenizer.from_file('/app/tokenizer.json')
+t = Tokenizer.from_file('/data/tokenizer.json' if __import__('os').path.exists('/data/tokenizer.json') else '/app/tokenizer.json')
 ids = json.loads(sys.argv[1])
 print(t.decode(ids), end='')
 "#;
