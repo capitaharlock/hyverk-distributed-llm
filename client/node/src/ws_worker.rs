@@ -304,67 +304,54 @@ async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsRespo
 
     info!(request_id = %request_id, size = hidden_data.len(), "Received hidden states for forward pass");
 
-    // Save hidden states to temp file for Python
-    let input_file = format!("/tmp/hyverk_ws_in_{}.pt", &request_id[..8]);
-    let output_file = format!("/tmp/hyverk_ws_out_{}.pt", &request_id[..8]);
-    if std::fs::write(&input_file, &hidden_data).is_err() {
-        error!("Failed to write hidden states to temp file");
-        return None;
-    }
-
-    // Determine our layer range from model_dir path
-    // model_dir format: .../inference_layers_10_20
     let (layer_start, layer_end) = parse_layer_range(model_dir);
     let is_last = layer_end >= 28;
-
-    let script = find_script("inference/node_forward.py");
-    let python = find_python();
     let mode = if is_last { "generate" } else { "forward" };
 
-    info!(request_id = %request_id, mode, layers = format!("{layer_start}-{layer_end}"), "Running forward pass");
+    info!(request_id = %request_id, mode, layers = format!("{layer_start}-{layer_end}"), "Running forward pass via inference server");
 
-    let mut cmd = tokio::process::Command::new(&python);
-    cmd.arg(&script)
-        .arg("--mode")
-        .arg(mode)
-        .arg("--model-dir")
-        .arg(model_dir)
-        .arg("--layer-start")
-        .arg(layer_start.to_string())
-        .arg("--layer-end")
-        .arg(layer_end.to_string())
-        .arg("--input-file")
-        .arg(&input_file);
+    // Call persistent inference server via HTTP
+    let port = 18100u16;
+    let url = format!("http://127.0.0.1:{port}");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build() {
+        Ok(c) => c,
+        Err(e) => { error!("HTTP client error: {e}"); return None; }
+    };
 
-    if !is_last {
-        cmd.arg("--output-file").arg(&output_file);
-    }
+    // Hidden states are raw f16 bytes from the other node
+    let hidden_size = 3584usize; // Qwen2.5-7B hidden size
+    let seq_len = hidden_data.len() / (hidden_size * 2); // f16 = 2 bytes
+    let shape = vec![1usize, seq_len, hidden_size];
 
-    let out = match tokio::time::timeout(std::time::Duration::from_secs(600), cmd.output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            error!("Forward script error: {e}");
-            return None;
-        }
-        Err(_) => {
-            error!("Forward timed out");
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&hidden_data);
+
+    let resp = match client.post(&url)
+        .json(&serde_json::json!({
+            "mode": mode,
+            "hidden_states": b64,
+            "shape": shape,
+        }))
+        .send().await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Inference server unreachable: {e}");
             return None;
         }
     };
 
-    let _ = std::fs::remove_file(&input_file);
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        error!("Forward failed: {stderr}");
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-
     if is_last {
-        // Last node: return token ID
-        let result: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+        // Generate mode: response is JSON with token_id
+        let result: serde_json::Value = match resp.json().await {
+            Ok(r) => r,
+            Err(e) => { error!("Bad generate response: {e}"); return None; }
+        };
+        if let Some(err) = result.get("error") {
+            error!("Generate error: {err}");
+            return None;
+        }
         let token_id = result["token_id"].as_u64()? as u32;
         let is_eos = token_id == 151643 || token_id == 151644 || token_id == 151645;
         info!(request_id = %request_id, token_id, eos = is_eos, "Token generated");
@@ -374,18 +361,15 @@ async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsRespo
             is_eos,
         }))
     } else {
-        // Middle node: return hidden states
-        let hidden_out = std::fs::read(&output_file).ok()?;
-        let _ = std::fs::remove_file(&output_file);
-        let result: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-        let shape = result["shape"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_u64().map(|n| n as usize))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Forward mode: response is raw hidden states
+        let shape_str = resp.headers().get("X-Shape")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("[]").to_string();
+        let shape: Vec<usize> = serde_json::from_str(&shape_str).unwrap_or_default();
+        let hidden_out = match resp.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(e) => { error!("Bad forward response: {e}"); return None; }
+        };
 
         info!(request_id = %request_id, hidden_size = hidden_out.len(), "Forward complete");
         let msg = ClientMessage::ForwardResult {
