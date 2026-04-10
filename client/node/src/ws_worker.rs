@@ -514,12 +514,35 @@ async fn download_layers(
 }
 
 fn find_python() -> String {
-    for p in &[".venv/bin/python3", "/usr/bin/python3", "python3"] {
+    // Windows: check for python.exe, python3.exe
+    // Unix: check for python3 in common locations
+    let candidates = if cfg!(windows) {
+        vec![".venv\\Scripts\\python.exe", "python.exe", "python3.exe"]
+    } else {
+        vec![".venv/bin/python3", "/usr/bin/python3", "python3"]
+    };
+
+    for p in &candidates {
         if std::path::Path::new(p).exists() {
             return p.to_string();
         }
     }
-    "python3".to_string()
+
+    // Try to find python in PATH using 'which' or 'where'
+    if cfg!(windows) {
+        if let Ok(output) = std::process::Command::new("where").arg("python").output() {
+            if output.status.success() {
+                if let Ok(path) = String::from_utf8(output.stdout) {
+                    if let Some(first_line) = path.lines().next() {
+                        return first_line.trim().to_string();
+                    }
+                }
+            }
+        }
+        "python.exe".to_string()
+    } else {
+        "python3".to_string()
+    }
 }
 
 fn find_script(name: &str) -> String {
