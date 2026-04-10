@@ -320,20 +320,15 @@ async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsRespo
         Err(e) => { error!("HTTP client error: {e}"); return None; }
     };
 
-    // Hidden states are raw f16 bytes from the other node
+    // Send hidden states as raw binary (no base64, no JSON wrapping)
     let hidden_size = 3584usize; // Qwen2.5-7B hidden size
     let seq_len = hidden_data.len() / (hidden_size * 2); // f16 = 2 bytes
-    let shape = vec![1usize, seq_len, hidden_size];
-
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&hidden_data);
 
     let resp = match client.post(&url)
-        .json(&serde_json::json!({
-            "mode": mode,
-            "hidden_states": b64,
-            "shape": shape,
-        }))
+        .header("X-Mode", mode)
+        .header("X-Shape", format!("[1,{seq_len},{hidden_size}]"))
+        .header("Content-Type", "application/octet-stream")
+        .body(hidden_data)
         .send().await {
         Ok(r) => r,
         Err(e) => {
@@ -469,8 +464,7 @@ async fn run_layer_forward(
         let hidden_data = resp.bytes().await?.to_vec();
         Ok((hidden_data, shape))
     } else {
-        // Forward/generate: send hidden states, get result back
-        // Hidden states are in a file — read it
+        // Forward/generate: send hidden states as raw binary
         let input_file = format!("/tmp/hyverk_ws_in_{}.bin", layer_start);
         let hidden_bytes = std::fs::read(&input_file)
             .map_err(|e| format!("Can't read hidden states: {e}"))?;
@@ -479,23 +473,14 @@ async fn run_layer_forward(
         let is_last = layer_end >= 28;
         let mode = if is_last { "generate" } else { "forward" };
 
-        // Encode as base64 for JSON transport
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&hidden_bytes);
-
-        // Parse shape from the binary data (first 4 bytes = ndim, then dims)
-        // Actually the hidden states are raw f16 numpy from torch.save — we need to figure out shape
-        // For now assume shape from the WS metadata
-        let hidden_size = 3584usize; // Qwen2.5-7B hidden size
-        let seq_len = hidden_bytes.len() / (hidden_size * 2); // f16 = 2 bytes
-        let shape = vec![1, seq_len, hidden_size];
+        let hidden_size = 3584usize;
+        let seq_len = hidden_bytes.len() / (hidden_size * 2);
 
         let resp = client.post(&url)
-            .json(&serde_json::json!({
-                "mode": mode,
-                "hidden_states": b64,
-                "shape": shape,
-            }))
+            .header("X-Mode", mode)
+            .header("X-Shape", format!("[1,{seq_len},{hidden_size}]"))
+            .header("Content-Type", "application/octet-stream")
+            .body(hidden_bytes)
             .send().await
             .map_err(|e| format!("Inference server error: {e}"))?;
 

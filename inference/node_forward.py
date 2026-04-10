@@ -194,76 +194,91 @@ def serve_model(args):
     config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
     print(f"Model loaded in {time.time()-t0:.1f}s on {device}", file=sys.stderr)
 
+    # Warmup pass to compile kernels
+    print("Running warmup pass...", file=sys.stderr)
+    with torch.no_grad():
+        dummy = torch.randn(1, 4, config.hidden_size, device=device, dtype=torch.float16)
+        pos = torch.arange(4, device=device).unsqueeze(0)
+        pe = rotary(dummy, pos)
+        for layer in layers:
+            out = layer(dummy, position_embeddings=pe, use_cache=False)
+            dummy = out[0] if isinstance(out, tuple) else out
+    print("Warmup done", file=sys.stderr)
+
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *a): pass  # suppress logs
+        def log_message(self, format, *a): pass
 
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            req = json.loads(body)
-            mode = req.get("mode", "forward")
+            content_type = self.headers.get("Content-Type", "")
+            mode = self.headers.get("X-Mode", "")
+            shape_str = self.headers.get("X-Shape", "")
 
             t0 = time.time()
             try:
-                if mode == "embed":
-                    token_ids = req["token_ids"]
-                    ids = torch.tensor([token_ids], device=device, dtype=torch.long)
-                    hidden = embed(ids)
-                    seq_len = hidden.shape[1]
-                    position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-                    pos_emb = rotary(hidden, position_ids)
-                    with torch.no_grad():
-                        for layer in layers:
-                            out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
-                            hidden = out[0] if isinstance(out, tuple) else out
-                    data = hidden.cpu().half().numpy().tobytes()
-                    shape = list(hidden.shape)
-                    elapsed = time.time() - t0
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/octet-stream")
-                    self.send_header("X-Shape", json.dumps(shape))
-                    self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
-                    self.send_header("Content-Length", str(len(data)))
-                    self.end_headers()
-                    self.wfile.write(data)
+                if content_type == "application/json":
+                    # JSON request — embed mode (token IDs)
+                    body = self.rfile.read(length)
+                    req = json.loads(body)
+                    mode = req.get("mode", mode or "forward")
 
-                elif mode in ("forward", "generate"):
-                    # Hidden states come as raw bytes in request body after JSON header
-                    hidden_b64 = req.get("hidden_states")
-                    import base64
-                    raw = base64.b64decode(hidden_b64)
-                    shape = req["shape"]
-                    import numpy as np
-                    arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
-                    hidden = torch.from_numpy(arr.copy()).to(device)
-
-                    seq_len = hidden.shape[1]
-                    position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-                    pos_emb = rotary(hidden, position_ids)
-                    with torch.no_grad():
-                        for layer in layers:
-                            out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
-                            hidden = out[0] if isinstance(out, tuple) else out
-                        if mode == "generate" and norm:
-                            hidden = norm(hidden)
-
-                    if mode == "generate" and lm_head:
-                        logits = lm_head.float()(hidden.float())
-                        token_id = int(torch.argmax(logits[0, -1]).item())
-                        elapsed = time.time() - t0
-                        resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Content-Length", str(len(resp)))
-                        self.end_headers()
-                        self.wfile.write(resp)
-                    else:
+                    if mode == "embed":
+                        token_ids = req["token_ids"]
+                        ids = torch.tensor([token_ids], device=device, dtype=torch.long)
+                        hidden = embed(ids)
+                        seq_len = hidden.shape[1]
+                        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+                        pos_emb = rotary(hidden, position_ids)
+                        with torch.no_grad():
+                            for layer in layers:
+                                out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
+                                hidden = out[0] if isinstance(out, tuple) else out
                         data = hidden.cpu().half().numpy().tobytes()
                         shape = list(hidden.shape)
                         elapsed = time.time() - t0
                         self.send_response(200)
                         self.send_header("Content-Type", "application/octet-stream")
                         self.send_header("X-Shape", json.dumps(shape))
+                        self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+
+                # Binary request — forward/generate mode (raw f16 hidden states)
+                raw = self.rfile.read(length)
+                import numpy as np
+                shape = json.loads(shape_str) if shape_str else [1, length // (config.hidden_size * 2), config.hidden_size]
+                arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
+                hidden = torch.from_numpy(arr.copy()).to(device)
+
+                seq_len = hidden.shape[1]
+                position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+                pos_emb = rotary(hidden, position_ids)
+                with torch.no_grad():
+                    for layer in layers:
+                        out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
+                        hidden = out[0] if isinstance(out, tuple) else out
+                    if mode == "generate" and norm:
+                        hidden = norm(hidden)
+
+                if mode == "generate" and lm_head:
+                    logits = lm_head.float()(hidden.float())
+                    token_id = int(torch.argmax(logits[0, -1]).item())
+                    elapsed = time.time() - t0
+                    resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                else:
+                    data = hidden.cpu().half().numpy().tobytes()
+                    shape = list(hidden.shape)
+                    elapsed = time.time() - t0
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("X-Shape", json.dumps(shape))
                         self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
                         self.send_header("Content-Length", str(len(data)))
                         self.end_headers()
