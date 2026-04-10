@@ -16,6 +16,7 @@ pub async fn run_ws_worker(
     has_gpu: bool,
     ram_mb: u64,
     model_dir: &str,
+    available_models: Vec<String>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     // Convert HTTPS URL to WSS
@@ -38,8 +39,12 @@ pub async fn run_ws_worker(
     let layers_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let download_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // CPU nodes report ready immediately (training/synthesis only, no inference)
-    if !has_gpu {
+    // GPU nodes with GGUF models use local inference, CPU nodes need PyTorch layers
+    let use_gguf = has_gpu && !available_models.is_empty();
+    if use_gguf {
+        layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        info!(models = ?available_models, "GPU node with GGUF — using local llama.cpp inference");
+    } else if !has_gpu {
         layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
         info!("CPU node — training/synthesis only, no inference layers needed");
     }
@@ -50,7 +55,7 @@ pub async fn run_ws_worker(
                 info!("WS worker shutting down");
                 break;
             }
-            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &model_dir, &coordinator_http, &assigned_layers, &layers_ready, &download_failed, &shutdown) => {
+            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &model_dir, &coordinator_http, &assigned_layers, &layers_ready, &download_failed, use_gguf, &shutdown) => {
                 match result {
                     Ok(()) => info!("WS connection closed cleanly"),
                     Err(e) => warn!("WS connection error: {e}"),
@@ -74,6 +79,7 @@ async fn connect_and_run(
     assigned_layers: &std::sync::Arc<tokio::sync::RwLock<Option<(usize, usize)>>>,
     layers_ready: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     download_failed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    use_gguf: bool,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(url = ws_url, "Connecting WebSocket...");
@@ -97,9 +103,19 @@ async fn connect_and_run(
 
     // Report initial state
     let initial_state = if layers_ready.load(std::sync::atomic::Ordering::SeqCst) {
-        ("ready".to_string(), if has_gpu { "GPU node — waiting for layer assignment".to_string() } else { "CPU node — training/synthesis only".to_string() })
+        (
+            "ready".to_string(),
+            if has_gpu {
+                "GPU node — waiting for layer assignment".to_string()
+            } else {
+                "CPU node — training/synthesis only".to_string()
+            },
+        )
     } else {
-        ("connecting".to_string(), "Waiting for layer assignment from coordinator".to_string())
+        (
+            "connecting".to_string(),
+            "Waiting for layer assignment from coordinator".to_string(),
+        )
     };
     let state_msg = ClientMessage::StateUpdate {
         state: initial_state.0,
@@ -129,6 +145,17 @@ async fn connect_and_run(
                                     let ls = *layer_start;
                                     let le = *layer_end;
                                     *assigned_layers.write().await = Some((ls, le));
+
+                                    // GPU nodes with GGUF skip layer download and use local llama.cpp
+                                    if use_gguf {
+                                        info!("GPU node with GGUF — ignoring layer assignment, using local llama.cpp inference");
+                                        let state_msg = ClientMessage::StateUpdate {
+                                            state: "ready".to_string(),
+                                            detail: "Using local GGUF model with llama.cpp".to_string(),
+                                        };
+                                        let _ = sink.send(Message::Text(serde_json::to_string(&state_msg).unwrap_or_default().into())).await;
+                                        continue;
+                                    }
 
                                     let dl_msg = ClientMessage::StateUpdate {
                                         state: "downloading".to_string(),

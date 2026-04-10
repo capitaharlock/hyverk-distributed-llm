@@ -37,7 +37,13 @@ pub async fn run_node(
         max_concurrent_tasks: config.max_concurrent_tasks,
     };
 
-    let conn = connect_with_retry(&config.coordinator_url, config.name.clone(), capabilities, &shutdown).await?;
+    let conn = connect_with_retry(
+        &config.coordinator_url,
+        config.name.clone(),
+        capabilities,
+        &shutdown,
+    )
+    .await?;
 
     let node_id = conn.node_id().to_string();
     let heartbeat_interval = conn.heartbeat_interval();
@@ -89,6 +95,7 @@ pub async fn run_node(
     let ws_hw = config.hardware_info.clone();
     let ws_model_dir = model_dir.clone();
     let ws_shutdown = shutdown.clone();
+    let ws_available_models = available_models.clone();
     // Detect GPU from hardware_info string or model availability
     let has_gpu = config.hardware_info.contains("Metal")
         || config.hardware_info.contains("NVIDIA")
@@ -101,16 +108,26 @@ pub async fn run_node(
         || !available_models.is_empty(); // has GGUF = likely has GPU
     tokio::spawn(async move {
         ws_worker::run_ws_worker(
-            &ws_coord, &ws_name, &ws_hw,
+            &ws_coord,
+            &ws_name,
+            &ws_hw,
             has_gpu,
             48000, // ram_mb — TODO: detect dynamically
             &ws_model_dir,
+            ws_available_models,
             ws_shutdown,
-        ).await;
+        )
+        .await;
     });
 
     tokio::spawn(async move {
-        layer_worker::run_layer_worker(&coordinator_http, &layer_node_id, &model_dir, shutdown_layer).await;
+        layer_worker::run_layer_worker(
+            &coordinator_http,
+            &layer_node_id,
+            &model_dir,
+            shutdown_layer,
+        )
+        .await;
     });
 
     // Poll loop
@@ -183,7 +200,11 @@ async fn connect_with_retry(
             Err(e) => {
                 attempt += 1;
                 let delay = Duration::from_secs((2u64).pow(attempt.min(5)));
-                error!(attempt, delay_secs = delay.as_secs(), "Connection failed: {e}, retrying...");
+                error!(
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    "Connection failed: {e}, retrying..."
+                );
                 tokio::select! {
                     _ = shutdown.cancelled() => {
                         return Err(Box::new(e));
