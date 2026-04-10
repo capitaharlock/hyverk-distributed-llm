@@ -95,6 +95,7 @@
           <th>Name</th>
           <th>Type</th>
           <th>Hardware</th>
+          <th>Version</th>
           <th>Layers</th>
           <th>Inference State</th>
           <th>Tasks</th>
@@ -209,6 +210,7 @@
           '<td class="name">'+n.node_name+'</td>' +
           '<td>'+typeTag+'</td>' +
           '<td style="color:#6e7681">'+n.hardware+'</td>' +
+          '<td class="mono">'+(ci && ci.client_version ? ci.client_version : '—')+'<br><span style="color:#484f58">'+(ci && ci.os ? ci.os : '')+'</span></td>' +
           '<td>'+layersHtml+'</td>' +
           '<td>'+stateHtml+'</td>' +
           '<td style="text-align:center">'+(n.active_tasks||0)+'</td>' +

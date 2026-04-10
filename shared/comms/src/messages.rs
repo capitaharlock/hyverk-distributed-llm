@@ -57,6 +57,10 @@ pub enum ClientMessage {
         ram_mb: u64,
         has_gpu: bool,
         layer_range: Option<(u32, u32)>,
+        #[serde(default)]
+        client_version: String,
+        #[serde(default)]
+        os: String,
     },
     /// Status heartbeat
     Heartbeat {

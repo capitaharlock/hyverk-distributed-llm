@@ -56,6 +56,8 @@ impl WsClient {
             ram_mb: 0,
             has_gpu: false,
             layer_range: None,
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            os: std::env::consts::OS.to_string(),
         };
         let msg = serde_json::to_string(&reg)?;
         sink.send(Message::Text(msg.into())).await?;

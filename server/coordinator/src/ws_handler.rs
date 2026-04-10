@@ -20,6 +20,8 @@ pub struct WsNode {
     pub ram_mb: u64,
     pub state: String, // "connecting", "downloading", "ready", "processing", "error"
     pub state_detail: String,
+    pub client_version: String,
+    pub os: String,
     pub tx: mpsc::UnboundedSender<Message>,
 }
 
@@ -149,6 +151,8 @@ pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
             detail: node.state_detail.clone(),
             layer_start: start,
             layer_end: end,
+            client_version: node.client_version.clone(),
+            os: node.os.clone(),
         });
     }
     node_states.sort_by_key(|n| n.layer_start);
@@ -200,6 +204,8 @@ pub struct NodeInferenceState {
     pub detail: String,
     pub layer_start: usize,
     pub layer_end: usize,
+    pub client_version: String,
+    pub os: String,
 }
 
 /// Axum handler for WebSocket upgrade
@@ -268,6 +274,8 @@ async fn handle_client_message(
             ram_mb,
             has_gpu,
             layer_range,
+            client_version,
+            os,
         } => {
             let node = WsNode {
                 node_id: node_id.to_string(),
@@ -276,6 +284,8 @@ async fn handle_client_message(
                 ram_mb,
                 state: "connecting".to_string(),
                 state_detail: String::new(),
+                client_version: client_version.clone(),
+                os: os.clone(),
                 tx: tx.clone(),
             };
             // Remove stale entries with same name (prevents duplicates on reconnect)
