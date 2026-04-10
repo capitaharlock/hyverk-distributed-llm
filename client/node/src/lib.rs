@@ -95,8 +95,7 @@ pub async fn run_node(
     let ws_hw = config.hardware_info.clone();
     let ws_model_dir = model_dir.clone();
     let ws_shutdown = shutdown.clone();
-    let ws_available_models = available_models.clone();
-    // Detect GPU from hardware_info string or model availability
+    // Detect GPU from hardware_info string
     let has_gpu = config.hardware_info.contains("Metal")
         || config.hardware_info.contains("NVIDIA")
         || config.hardware_info.contains("RTX")
@@ -104,8 +103,7 @@ pub async fn run_node(
         || config.hardware_info.contains("M1")
         || config.hardware_info.contains("M2")
         || config.hardware_info.contains("M3")
-        || config.hardware_info.contains("M4")
-        || !available_models.is_empty(); // has GGUF = likely has GPU
+        || config.hardware_info.contains("M4");
     tokio::spawn(async move {
         ws_worker::run_ws_worker(
             &ws_coord,
@@ -114,7 +112,6 @@ pub async fn run_node(
             has_gpu,
             48000, // ram_mb — TODO: detect dynamically
             &ws_model_dir,
-            ws_available_models,
             ws_shutdown,
         )
         .await;
