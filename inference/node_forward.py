@@ -279,10 +279,10 @@ def serve_model(args):
                     self.send_response(200)
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("X-Shape", json.dumps(shape))
-                        self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
-                        self.send_header("Content-Length", str(len(data)))
-                        self.end_headers()
-                        self.wfile.write(data)
+                    self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
 
             except Exception as e:
                 err = json.dumps({"error": str(e)}).encode()
