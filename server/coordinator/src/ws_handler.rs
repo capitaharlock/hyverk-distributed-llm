@@ -438,15 +438,14 @@ async fn handle_generated_token(
                 .ok();
             }
         } else {
-            // Need more tokens — restart chain from first node
+            // Need more tokens — send ONLY the last generated token (KV cache handles history)
             pending.current_step = 0;
             let first = &pending.chain[0];
-            let mut token_ids = pending.token_ids.clone();
-            token_ids.extend_from_slice(&pending.generated);
+            let last_token = *pending.generated.last().unwrap_or(&0);
 
             let msg = CoordinatorMessage::InferenceStart {
                 request_id: request_id.to_string(),
-                token_ids,
+                token_ids: vec![last_token],
                 layer_start: first.layer_start,
                 layer_end: first.layer_end,
                 max_tokens: pending.max_tokens,
