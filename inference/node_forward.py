@@ -210,11 +210,13 @@ def serve_model(args):
     print("Warmup done", file=sys.stderr)
 
     def run_forward(hidden, request_id, is_generate):
-        """Run forward pass with KV cache support."""
+        """Run forward pass with KV cache (DynamicCache) support."""
+        from transformers.cache_utils import DynamicCache
         nonlocal kv_cache
 
-        cached = kv_cache.get(request_id)
-        past_seq_len = cached["seq_len"] if cached else 0
+        cached_entry = kv_cache.get(request_id)
+        past_kv = cached_entry["cache"] if cached_entry else DynamicCache()
+        past_seq_len = past_kv.get_seq_length() if cached_entry else 0
         cur_seq_len = hidden.shape[1]
         total_seq_len = past_seq_len + cur_seq_len
 
@@ -222,26 +224,28 @@ def serve_model(args):
         position_ids = torch.arange(past_seq_len, total_seq_len, device=device).unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
 
-        new_kvs = []
+        # Cache position for proper KV cache indexing
+        cache_position = torch.arange(past_seq_len, total_seq_len, device=device)
+
         with torch.no_grad():
-            for i, layer in enumerate(layers):
-                past_kv = cached["kv"][i] if cached else None
-                out = layer(hidden, position_embeddings=pos_emb, past_key_value=past_kv, use_cache=True)
-                if isinstance(out, tuple) and len(out) >= 2:
-                    hidden = out[0]
-                    new_kvs.append(out[1])
-                else:
-                    hidden = out[0] if isinstance(out, tuple) else out
-                    new_kvs.append(None)
+            for layer in layers:
+                out = layer(
+                    hidden,
+                    position_embeddings=pos_emb,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                    cache_position=cache_position,
+                )
+                hidden = out[0] if isinstance(out, tuple) else out
 
             if is_generate and norm:
                 hidden = norm(hidden)
 
-        # Store updated KV cache
+        # Store updated KV cache (DynamicCache is mutated in-place by layers)
         if len(kv_cache) >= MAX_CACHE_ENTRIES:
             oldest = next(iter(kv_cache))
             del kv_cache[oldest]
-        kv_cache[request_id] = {"kv": new_kvs, "seq_len": total_seq_len}
+        kv_cache[request_id] = {"cache": past_kv}
 
         return hidden
 
