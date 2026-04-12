@@ -255,7 +255,7 @@ async fn handle_coordinator_message(
             info!(request_id = %request_id, layers = format!("{layer_start}-{layer_end}"), tokens = token_ids.len(), "Inference start: embed + forward");
 
             let result =
-                run_layer_forward(model_dir, &token_ids, layer_start, layer_end, true).await;
+                run_layer_forward(model_dir, &token_ids, layer_start, layer_end, true, &request_id).await;
 
             match result {
                 Ok((hidden_data, shape)) => {
@@ -320,13 +320,14 @@ async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsRespo
         Err(e) => { error!("HTTP client error: {e}"); return None; }
     };
 
-    // Send hidden states as raw binary (no base64, no JSON wrapping)
+    // Send hidden states as raw binary with request ID for KV cache
     let hidden_size = 3584usize; // Qwen2.5-7B hidden size
     let seq_len = hidden_data.len() / (hidden_size * 2); // f16 = 2 bytes
 
     let resp = match client.post(&url)
         .header("X-Mode", mode)
         .header("X-Shape", format!("[1,{seq_len},{hidden_size}]"))
+        .header("X-Request-Id", &request_id)
         .header("Content-Type", "application/octet-stream")
         .body(hidden_data)
         .send().await {
@@ -443,6 +444,7 @@ async fn run_layer_forward(
     layer_start: usize,
     layer_end: usize,
     is_first: bool,
+    request_id: &str,
 ) -> Result<(Vec<u8>, Vec<usize>), Box<dyn std::error::Error + Send + Sync>> {
     let port = 18100u16;
     let url = format!("http://127.0.0.1:{port}");
@@ -453,7 +455,7 @@ async fn run_layer_forward(
     if is_first {
         // Embed mode: send token IDs, get hidden states back
         let resp = client.post(&url)
-            .json(&serde_json::json!({"mode": "embed", "token_ids": token_ids}))
+            .json(&serde_json::json!({"mode": "embed", "token_ids": token_ids, "request_id": request_id}))
             .send().await
             .map_err(|e| format!("Inference server unreachable: {e}. Is it running?"))?;
 
@@ -479,6 +481,7 @@ async fn run_layer_forward(
         let resp = client.post(&url)
             .header("X-Mode", mode)
             .header("X-Shape", format!("[1,{seq_len},{hidden_size}]"))
+            .header("X-Request-Id", request_id)
             .header("Content-Type", "application/octet-stream")
             .body(hidden_bytes)
             .send().await

@@ -194,16 +194,56 @@ def serve_model(args):
     config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
     print(f"Model loaded in {time.time()-t0:.1f}s on {device}", file=sys.stderr)
 
-    # Warmup pass to compile kernels
+    # KV cache: stores past_key_values per request_id for incremental decoding
+    # Each entry: {"kv": list of (key, value) tuples per layer, "seq_len": int}
+    kv_cache = {}
+    MAX_CACHE_ENTRIES = 8  # limit memory usage
+
+    # Warmup pass with use_cache=True to compile kernels
     print("Running warmup pass...", file=sys.stderr)
     with torch.no_grad():
         dummy = torch.randn(1, 4, config.hidden_size, device=device, dtype=torch.float16)
         pos = torch.arange(4, device=device).unsqueeze(0)
         pe = rotary(dummy, pos)
         for layer in layers:
-            out = layer(dummy, position_embeddings=pe, use_cache=False)
-            dummy = out[0] if isinstance(out, tuple) else out
+            out = layer(dummy, position_embeddings=pe, use_cache=True)
     print("Warmup done", file=sys.stderr)
+
+    def run_forward(hidden, request_id, is_generate):
+        """Run forward pass with KV cache support."""
+        nonlocal kv_cache
+
+        cached = kv_cache.get(request_id)
+        past_seq_len = cached["seq_len"] if cached else 0
+        cur_seq_len = hidden.shape[1]
+        total_seq_len = past_seq_len + cur_seq_len
+
+        # Position IDs: offset by past sequence length
+        position_ids = torch.arange(past_seq_len, total_seq_len, device=device).unsqueeze(0)
+        pos_emb = rotary(hidden, position_ids)
+
+        new_kvs = []
+        with torch.no_grad():
+            for i, layer in enumerate(layers):
+                past_kv = cached["kv"][i] if cached else None
+                out = layer(hidden, position_embeddings=pos_emb, past_key_value=past_kv, use_cache=True)
+                if isinstance(out, tuple) and len(out) >= 2:
+                    hidden = out[0]
+                    new_kvs.append(out[1])
+                else:
+                    hidden = out[0] if isinstance(out, tuple) else out
+                    new_kvs.append(None)
+
+            if is_generate and norm:
+                hidden = norm(hidden)
+
+        # Store updated KV cache
+        if len(kv_cache) >= MAX_CACHE_ENTRIES:
+            oldest = next(iter(kv_cache))
+            del kv_cache[oldest]
+        kv_cache[request_id] = {"kv": new_kvs, "seq_len": total_seq_len}
+
+        return hidden
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *a): pass
@@ -213,26 +253,21 @@ def serve_model(args):
             content_type = self.headers.get("Content-Type", "")
             mode = self.headers.get("X-Mode", "")
             shape_str = self.headers.get("X-Shape", "")
+            request_id = self.headers.get("X-Request-Id", "")
 
             t0 = time.time()
             try:
                 if content_type == "application/json":
-                    # JSON request — embed mode (token IDs)
                     body = self.rfile.read(length)
                     req = json.loads(body)
                     mode = req.get("mode", mode or "forward")
+                    request_id = req.get("request_id", request_id)
 
                     if mode == "embed":
                         token_ids = req["token_ids"]
                         ids = torch.tensor([token_ids], device=device, dtype=torch.long)
                         hidden = embed(ids)
-                        seq_len = hidden.shape[1]
-                        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-                        pos_emb = rotary(hidden, position_ids)
-                        with torch.no_grad():
-                            for layer in layers:
-                                out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
-                                hidden = out[0] if isinstance(out, tuple) else out
+                        hidden = run_forward(hidden, request_id, False)
                         data = hidden.cpu().half().numpy().tobytes()
                         shape = list(hidden.shape)
                         elapsed = time.time() - t0
@@ -245,24 +280,29 @@ def serve_model(args):
                         self.wfile.write(data)
                         return
 
-                # Binary request — forward/generate mode (raw f16 hidden states)
+                    if mode == "clear_cache":
+                        rid = req.get("request_id", "")
+                        if rid in kv_cache:
+                            del kv_cache[rid]
+                        resp = json.dumps({"status": "ok"}).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp)))
+                        self.end_headers()
+                        self.wfile.write(resp)
+                        return
+
+                # Binary request — forward/generate mode
                 raw = self.rfile.read(length)
                 import numpy as np
                 shape = json.loads(shape_str) if shape_str else [1, length // (config.hidden_size * 2), config.hidden_size]
                 arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
                 hidden = torch.from_numpy(arr.copy()).to(device)
 
-                seq_len = hidden.shape[1]
-                position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-                pos_emb = rotary(hidden, position_ids)
-                with torch.no_grad():
-                    for layer in layers:
-                        out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
-                        hidden = out[0] if isinstance(out, tuple) else out
-                    if mode == "generate" and norm:
-                        hidden = norm(hidden)
+                is_generate = (mode == "generate")
+                hidden = run_forward(hidden, request_id, is_generate)
 
-                if mode == "generate" and lm_head:
+                if is_generate and lm_head:
                     logits = lm_head.float()(hidden.float())
                     token_id = int(torch.argmax(logits[0, -1]).item())
                     elapsed = time.time() - t0
