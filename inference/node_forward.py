@@ -215,12 +215,13 @@ def serve_model(args):
         position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
 
-        # Build causal attention mask [1, 1, seq_len, seq_len]
-        # -inf above diagonal, 0 on/below (each token attends to itself and prior tokens)
+        # Build causal attention mask in the same dtype as hidden states.
+        # Use a large negative value that won't overflow but is small enough
+        # after softmax. Qwen2's own impl uses torch.finfo(dtype).min clamped.
         dtype = hidden.dtype
-        min_val = torch.finfo(dtype).min
-        causal_mask = torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device)
-        causal_mask = torch.triu(causal_mask, diagonal=1)
+        causal_mask = torch.zeros((seq_len, seq_len), dtype=dtype, device=device)
+        mask_val = torch.finfo(dtype).min if dtype != torch.float16 else -1e4
+        causal_mask.masked_fill_(torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1), mask_val)
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
         cache_position = torch.arange(seq_len, device=device)
 
