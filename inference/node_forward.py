@@ -210,14 +210,30 @@ def serve_model(args):
     print("Warmup done", file=sys.stderr)
 
     def run_forward(hidden, request_id, is_generate):
-        """Run forward pass without KV cache (each call is independent)."""
+        """Run forward pass with proper causal attention mask."""
         seq_len = hidden.shape[1]
         position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
 
+        # Build causal attention mask [1, 1, seq_len, seq_len]
+        # -inf above diagonal, 0 on/below (each token attends to itself and prior tokens)
+        dtype = hidden.dtype
+        min_val = torch.finfo(dtype).min
+        causal_mask = torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device)
+        causal_mask = torch.triu(causal_mask, diagonal=1)
+        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+        cache_position = torch.arange(seq_len, device=device)
+
         with torch.no_grad():
             for layer in layers:
-                out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
+                out = layer(
+                    hidden,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    position_embeddings=pos_emb,
+                    cache_position=cache_position,
+                    use_cache=False,
+                )
                 hidden = out[0] if isinstance(out, tuple) else out
 
             if is_generate and norm:
