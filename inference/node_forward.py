@@ -121,6 +121,12 @@ def load_model_layers(args):
 
     config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True)
     config._attn_implementation = "eager"
+    # Disable sliding window — known to cause bugs when calling Qwen2DecoderLayer directly
+    # (transformers issues #35896, #35924, #36361, #40126)
+    config.sliding_window = None
+    config.use_sliding_window = False
+    if hasattr(config, 'max_window_layers'):
+        config.max_window_layers = config.num_hidden_layers
 
     # Load weights
     with open(os.path.join(args.model_dir, "model.safetensors.index.json")) as f:
@@ -210,20 +216,27 @@ def serve_model(args):
     print("Warmup done", file=sys.stderr)
 
     def run_forward(hidden, request_id, is_generate):
-        """Run forward pass with proper causal attention mask."""
+        """Run forward pass replicating what Qwen2Model.forward does before the layer loop.
+
+        Critical: must pass position_ids, position_embeddings=(cos,sin), cache_position,
+        and a proper 4D fp16 causal mask using torch.finfo(dtype).min.
+        Without this, Qwen2DecoderLayer direct calls corrupt rotary → NaN → argmax=0.
+        """
         seq_len = hidden.shape[1]
-        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+        dtype = hidden.dtype
+
+        # Canonical setup matching Qwen2Model.forward
+        cache_position = torch.arange(seq_len, device=device)
+        position_ids = cache_position.unsqueeze(0)  # (1, seq_len)
+
+        # Rotary: compute (cos, sin) ONCE at the model level, pass to every layer
         pos_emb = rotary(hidden, position_ids)
 
-        # Build causal attention mask in the same dtype as hidden states.
-        # Use a large negative value that won't overflow but is small enough
-        # after softmax. Qwen2's own impl uses torch.finfo(dtype).min clamped.
-        dtype = hidden.dtype
-        causal_mask = torch.zeros((seq_len, seq_len), dtype=dtype, device=device)
-        mask_val = torch.finfo(dtype).min if dtype != torch.float16 else -1e4
-        causal_mask.masked_fill_(torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1), mask_val)
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
-        cache_position = torch.arange(seq_len, device=device)
+        # 4D causal mask, additive, dtype-matched, using torch.finfo(dtype).min
+        min_val = torch.finfo(dtype).min  # fp16: -65504
+        causal_mask = torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device)
+        causal_mask = torch.triu(causal_mask, diagonal=1)
+        causal_mask = causal_mask[None, None, :, :]  # (1, 1, S, S)
 
         with torch.no_grad():
             for layer in layers:
@@ -231,11 +244,16 @@ def serve_model(args):
                     hidden,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
-                    position_embeddings=pos_emb,
-                    cache_position=cache_position,
+                    past_key_values=None,
                     use_cache=False,
+                    cache_position=cache_position,
+                    position_embeddings=pos_emb,
                 )
                 hidden = out[0] if isinstance(out, tuple) else out
+
+                # NaN detection: fail fast if any layer produces NaN
+                if torch.isnan(hidden).any() or torch.isinf(hidden).any():
+                    print(f"WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
 
             if is_generate and norm:
                 hidden = norm(hidden)
