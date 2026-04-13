@@ -240,18 +240,30 @@ def serve_model(args):
 
         with torch.no_grad():
             for layer in layers:
-                out = layer(
-                    hidden,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_values=None,
-                    use_cache=False,
-                    cache_position=cache_position,
-                    position_embeddings=pos_emb,
-                )
+                # Use try/except to handle different transformers versions
+                # Some versions use past_key_value (singular), some past_key_values
+                try:
+                    out = layer(
+                        hidden,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_values=None,
+                        use_cache=False,
+                        cache_position=cache_position,
+                        position_embeddings=pos_emb,
+                    )
+                except TypeError:
+                    # Fallback for older transformers
+                    out = layer(
+                        hidden,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=None,
+                        use_cache=False,
+                        position_embeddings=pos_emb,
+                    )
                 hidden = out[0] if isinstance(out, tuple) else out
 
-                # NaN detection: fail fast if any layer produces NaN
                 if torch.isnan(hidden).any() or torch.isinf(hidden).any():
                     print(f"WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
 
