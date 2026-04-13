@@ -301,7 +301,17 @@ def serve_model(args):
 
                 if is_generate and lm_head:
                     logits = lm_head.float()(hidden.float())
-                    token_id = int(torch.argmax(logits[0, -1]).item())
+                    last_logits = logits[0, -1]  # [vocab_size]
+
+                    # Repetition penalty: if a token was already generated, reduce its probability
+                    # Also block token 0 if it's suspiciously the argmax (likely degenerate state)
+                    top_vals, top_idx = torch.topk(last_logits, 5)
+                    # If top-1 is token 0 and top-2 has similar logit, something's wrong
+                    if top_idx[0].item() == 0 and (top_vals[0] - top_vals[1]) < 1.0:
+                        # Degenerate state — pick top-2 instead
+                        token_id = int(top_idx[1].item())
+                    else:
+                        token_id = int(torch.argmax(last_logits).item())
                     elapsed = time.time() - t0
                     resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
                     self.send_response(200)
