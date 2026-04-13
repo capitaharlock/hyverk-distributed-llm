@@ -210,42 +210,18 @@ def serve_model(args):
     print("Warmup done", file=sys.stderr)
 
     def run_forward(hidden, request_id, is_generate):
-        """Run forward pass with KV cache (DynamicCache) support."""
-        from transformers.cache_utils import DynamicCache
-        nonlocal kv_cache
-
-        cached_entry = kv_cache.get(request_id)
-        past_kv = cached_entry["cache"] if cached_entry else DynamicCache()
-        past_seq_len = past_kv.get_seq_length() if cached_entry else 0
-        cur_seq_len = hidden.shape[1]
-        total_seq_len = past_seq_len + cur_seq_len
-
-        # Position IDs: offset by past sequence length
-        position_ids = torch.arange(past_seq_len, total_seq_len, device=device).unsqueeze(0)
+        """Run forward pass without KV cache (each call is independent)."""
+        seq_len = hidden.shape[1]
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
-
-        # Cache position for proper KV cache indexing
-        cache_position = torch.arange(past_seq_len, total_seq_len, device=device)
 
         with torch.no_grad():
             for layer in layers:
-                out = layer(
-                    hidden,
-                    position_embeddings=pos_emb,
-                    past_key_values=past_kv,
-                    use_cache=True,
-                    cache_position=cache_position,
-                )
+                out = layer(hidden, position_embeddings=pos_emb, use_cache=False)
                 hidden = out[0] if isinstance(out, tuple) else out
 
             if is_generate and norm:
                 hidden = norm(hidden)
-
-        # Store updated KV cache (DynamicCache is mutated in-place by layers)
-        if len(kv_cache) >= MAX_CACHE_ENTRIES:
-            oldest = next(iter(kv_cache))
-            del kv_cache[oldest]
-        kv_cache[request_id] = {"cache": past_kv}
 
         return hidden
 
