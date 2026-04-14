@@ -11,7 +11,6 @@ electron/out/
 # _rjj/ is tracked but encrypted
 
 # Deploy configs (Fly.io, Docker, entrypoints, platform scripts)
-/clients/
 /deploy/
 Dockerfile
 *.Dockerfile

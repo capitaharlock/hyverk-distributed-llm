@@ -36,7 +36,7 @@ Contributors (Mac/Windows/Linux)     Coordinator (Fly.io)
 ```bash
 git clone https://github.com/capitaharlock/hyverk.com.git
 cd hyverk.com
-bash clients/setup.sh
+bash deploy/setup.sh
 ```
 
 ### Windows
@@ -44,7 +44,7 @@ bash clients/setup.sh
 ```powershell
 git clone https://github.com/capitaharlock/hyverk.com.git
 cd hyverk.com
-powershell -ExecutionPolicy Bypass -File clients\setup.ps1
+powershell -ExecutionPolicy Bypass -File deploy\setup.ps1
 ```
 
 ### Requirements
