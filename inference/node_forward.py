@@ -333,15 +333,17 @@ def serve_model(args):
                     logits = lm_head.float()(hidden.float())
                     last_logits = logits[0, -1]  # [vocab_size]
 
-                    # Repetition penalty: if a token was already generated, reduce its probability
-                    # Also block token 0 if it's suspiciously the argmax (likely degenerate state)
-                    top_vals, top_idx = torch.topk(last_logits, 5)
-                    # If top-1 is token 0 and top-2 has similar logit, something's wrong
-                    if top_idx[0].item() == 0 and (top_vals[0] - top_vals[1]) < 1.0:
-                        # Degenerate state — pick top-2 instead
-                        token_id = int(top_idx[1].item())
-                    else:
-                        token_id = int(torch.argmax(last_logits).item())
+                    # Clean NaN/Inf from logits (caused by fp16 overflow in attention)
+                    nan_mask = torch.isnan(last_logits) | torch.isinf(last_logits)
+                    if nan_mask.any():
+                        print(f"WARNING: {nan_mask.sum().item()} NaN/Inf in logits, cleaning", file=sys.stderr)
+                        last_logits = torch.where(nan_mask, torch.tensor(-1e5, device=last_logits.device), last_logits)
+
+                    # Block token 0 ("!") — Qwen2 vocab id 0 is "!" which is almost
+                    # always a numerical artifact when argmax returns 0 from degraded states
+                    last_logits[0] = -1e5
+
+                    token_id = int(torch.argmax(last_logits).item())
                     elapsed = time.time() - t0
                     resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
                     self.send_response(200)
