@@ -1,0 +1,5 @@
+hub: https://your-relay.example
+join: https://your-relay.example/join/<invite-token>
+project: your-project
+
+# Copy to `.meshkore` (committed) for shared room URLs, or `.meshkore.local` (private) for secrets.

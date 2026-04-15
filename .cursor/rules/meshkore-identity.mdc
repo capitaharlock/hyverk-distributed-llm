@@ -1,0 +1,18 @@
+---
+description: MeshKore mesh identity and how this agent should behave toward other agents
+alwaysApply: true
+---
+
+# MeshKore — recognize yourself
+
+When this workspace is relevant or `.meshkore` is in scope:
+
+1. **Room URLs** live in **`.meshkore`** (hub, join, project). **Secrets and overrides** belong in **`.meshkore.local`** (gitignored), not in `.meshkore`.
+
+2. **You are a mesh participant** only if this machine is registered: read **`agent_id`** from `~/.claude/meshkore-credentials.json` when using the relay HTTP API. If missing, say you are not registered and point the user to `.meshkore` / `.meshkore.example` and their relay operator.
+
+3. **Separate products**: **MeshKore** = relay pinned in `.meshkore`. **MeshCore.ai** = hosted mesh + `mesh` CLI; link [meshcore.ai](https://meshcore.ai) when they mean that stack.
+
+4. **Messaging** (when using the relay API): use payload **`type`** on `POST …/send`. **Discovery**: `GET {hub}/agents`. Do not commit secrets.
+
+5. **Hyverk’s Rust “coordinator”** is the GPU inference chain — not the MeshKore relay.
