@@ -3,8 +3,20 @@
 // It splits the model across multiple processes/nodes for distributed inference.
 
 use hyverk_proto::{InferenceTask, SubmitResultRequest};
-use std::time::Instant;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tracing::{error, info};
+
+fn distributed_cluster_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(8)
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("reqwest client for distributed cluster")
+    })
+}
 
 pub async fn execute_task(
     _engine: &std::sync::Arc<hyverk_inference::engine::InferenceEngine>,
@@ -21,10 +33,7 @@ pub async fn execute_task(
         task.prompt
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = distributed_cluster_client();
 
     match client
         .post(cluster_url)

@@ -120,7 +120,9 @@ def load_model_layers(args):
                           "cuda" if torch.cuda.is_available() else "cpu")
 
     config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True)
-    config._attn_implementation = "eager"
+    # Sliding-window is disabled below; with full-window sequences we can use SDPA on GPU
+    # (fused attention, same math as eager matmul attention — faster tokens/s).
+    # Dynamic-quantized CPU path keeps eager for compatibility.
     # Disable sliding window — known to cause bugs when calling Qwen2DecoderLayer directly
     # (transformers issues #35896, #35924, #36361, #40126)
     config.sliding_window = None
@@ -135,6 +137,9 @@ def load_model_layers(args):
     use_quantize = (device.type == "cpu")
     if use_quantize:
         print("Using dynamic int8 quantization for CPU inference", file=sys.stderr)
+        config._attn_implementation = "eager"
+    else:
+        config._attn_implementation = "sdpa"
 
     weights = {}
     loaded_shards = set()
@@ -200,14 +205,25 @@ def serve_model(args):
     config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
     print(f"Model loaded in {time.time()-t0:.1f}s on {device}", file=sys.stderr)
 
-    # KV cache: stores past_key_values per request_id for incremental decoding
-    # Each entry: {"kv": list of (key, value) tuples per layer, "seq_len": int}
-    kv_cache = {}
-    MAX_CACHE_ENTRIES = 8  # limit memory usage
+    try:
+        from transformers.cache_utils import DynamicCache
+        from transformers.masking_utils import create_causal_mask
+        try:
+            from transformers.masking_utils import create_sliding_window_causal_mask
+        except ImportError:
+            create_sliding_window_causal_mask = None
+    except ImportError:
+        DynamicCache = None
+        create_causal_mask = None
+        create_sliding_window_causal_mask = None
+
+    # request_id -> {"cache": DynamicCache} (incremental decode; needs recent transformers + Qwen2)
+    kv_cache_state = {}
+    MAX_CACHE_ENTRIES = 8
 
     # Warmup pass with use_cache=True to compile kernels
     print("Running warmup pass...", file=sys.stderr)
-    with torch.no_grad():
+    with torch.inference_mode():
         dummy = torch.randn(1, 4, config.hidden_size, device=device, dtype=torch.float16)
         pos = torch.arange(4, device=device).unsqueeze(0)
         pe = rotary(dummy, pos)
@@ -215,33 +231,19 @@ def serve_model(args):
             out = layer(dummy, position_embeddings=pe, use_cache=True)
     print("Warmup done", file=sys.stderr)
 
-    def run_forward(hidden, request_id, is_generate):
-        """Run forward pass replicating what Qwen2Model.forward does before the layer loop.
-
-        Critical: must pass position_ids, position_embeddings=(cos,sin), cache_position,
-        and a proper 4D fp16 causal mask using torch.finfo(dtype).min.
-        Without this, Qwen2DecoderLayer direct calls corrupt rotary → NaN → argmax=0.
-        """
+    def run_forward_legacy(hidden, request_id, is_generate):
+        """Full attention mask (no KV) — fallback when DynamicCache is unavailable."""
         seq_len = hidden.shape[1]
         dtype = hidden.dtype
-
-        # Canonical setup matching Qwen2Model.forward
         cache_position = torch.arange(seq_len, device=device)
-        position_ids = cache_position.unsqueeze(0)  # (1, seq_len)
-
-        # Rotary: compute (cos, sin) ONCE at the model level, pass to every layer
+        position_ids = cache_position.unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
-
-        # 4D causal mask, additive, dtype-matched, using torch.finfo(dtype).min
-        min_val = torch.finfo(dtype).min  # fp16: -65504
+        min_val = torch.finfo(dtype).min
         causal_mask = torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device)
         causal_mask = torch.triu(causal_mask, diagonal=1)
-        causal_mask = causal_mask[None, None, :, :]  # (1, 1, S, S)
-
-        with torch.no_grad():
+        causal_mask = causal_mask[None, None, :, :]
+        with torch.inference_mode():
             for layer in layers:
-                # Use try/except to handle different transformers versions
-                # Some versions use past_key_value (singular), some past_key_values
                 try:
                     out = layer(
                         hidden,
@@ -253,7 +255,6 @@ def serve_model(args):
                         position_embeddings=pos_emb,
                     )
                 except TypeError:
-                    # Fallback for older transformers
                     out = layer(
                         hidden,
                         attention_mask=causal_mask,
@@ -263,14 +264,92 @@ def serve_model(args):
                         position_embeddings=pos_emb,
                     )
                 hidden = out[0] if isinstance(out, tuple) else out
-
                 if torch.isnan(hidden).any() or torch.isinf(hidden).any():
-                    print(f"WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
-
+                    print("WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
             if is_generate and norm:
                 hidden = norm(hidden)
-
         return hidden
+
+    def run_forward_kv(hidden, request_id, is_generate, reset_kv):
+        """Prefill / decode with HuggingFace DynamicCache (matches Qwen2Model path)."""
+        if not layers:
+            with torch.inference_mode():
+                if is_generate and norm:
+                    hidden = norm(hidden)
+            return hidden
+
+        seq_len = hidden.shape[1]
+        if reset_kv:
+            kv_cache_state.pop(request_id, None)
+        if request_id not in kv_cache_state:
+            kv_cache_state[request_id] = {"cache": DynamicCache(config=config)}
+            while len(kv_cache_state) > MAX_CACHE_ENTRIES:
+                kv_cache_state.pop(next(iter(kv_cache_state)))
+        past_key_values = kv_cache_state[request_id]["cache"]
+        past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+        position_ids = torch.arange(
+            past_seen, past_seen + seq_len, device=device, dtype=torch.long
+        ).unsqueeze(0)
+        pos_emb = rotary(hidden, position_ids)
+
+        causal_mask_mapping = None
+        if create_causal_mask is not None:
+            mask_kwargs = dict(
+                config=config,
+                inputs_embeds=hidden,
+                attention_mask=None,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+            )
+            causal_mask_mapping = {"full_attention": create_causal_mask(**mask_kwargs)}
+            if getattr(config, "has_sliding_layers", False) and create_sliding_window_causal_mask:
+                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(
+                    **mask_kwargs
+                )
+
+        nl = int(getattr(config, "num_hidden_layers", 28))
+        layer_types = getattr(config, "layer_types", None)
+        if not layer_types or len(layer_types) < nl:
+            layer_types = ["full_attention"] * nl
+
+        with torch.inference_mode():
+            for idx, layer in enumerate(layers):
+                gi = args.layer_start + idx
+                lt = layer_types[gi] if gi < len(layer_types) else "full_attention"
+                attn_mask = None
+                if causal_mask_mapping is not None:
+                    attn_mask = causal_mask_mapping.get(lt, causal_mask_mapping["full_attention"])
+                try:
+                    out = layer(
+                        hidden,
+                        attention_mask=attn_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        position_embeddings=pos_emb,
+                    )
+                except TypeError:
+                    cache_pos = torch.arange(past_seen, past_seen + seq_len, device=device)
+                    out = layer(
+                        hidden,
+                        attention_mask=attn_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        cache_position=cache_pos,
+                        position_embeddings=pos_emb,
+                    )
+                hidden = out[0] if isinstance(out, tuple) else out
+                if torch.isnan(hidden).any() or torch.isinf(hidden).any():
+                    print("WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
+            if is_generate and norm:
+                hidden = norm(hidden)
+        return hidden
+
+    def run_forward(hidden, request_id, is_generate, reset_kv=False):
+        if DynamicCache is None or not layers:
+            return run_forward_legacy(hidden, request_id, is_generate)
+        return run_forward_kv(hidden, request_id, is_generate, reset_kv)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *a): pass
@@ -292,9 +371,48 @@ def serve_model(args):
 
                     if mode == "embed":
                         token_ids = req["token_ids"]
-                        ids = torch.tensor([token_ids], device=device, dtype=torch.long)
-                        hidden = embed(ids)
-                        hidden = run_forward(hidden, request_id, False)
+                        with torch.inference_mode():
+                            ids = torch.tensor([token_ids], device=device, dtype=torch.long)
+                            hidden = embed(ids)
+                            hidden = run_forward(hidden, request_id, False, reset_kv=True)
+                        data = hidden.cpu().half().numpy().tobytes()
+                        shape = list(hidden.shape)
+                        elapsed = time.time() - t0
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("X-Shape", json.dumps(shape))
+                        self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+
+                    if mode == "embed_step":
+                        if DynamicCache is None or embed is None:
+                            err = json.dumps(
+                                {"error": "embed_step requires transformers DynamicCache and embed weights"}
+                            ).encode()
+                            self.send_response(503)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(err)))
+                            self.end_headers()
+                            self.wfile.write(err)
+                            return
+                        if request_id not in kv_cache_state:
+                            err = json.dumps(
+                                {"error": "no KV for request_id; run embed (prefill) first"}
+                            ).encode()
+                            self.send_response(409)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(err)))
+                            self.end_headers()
+                            self.wfile.write(err)
+                            return
+                        tid = int(req["token_id"])
+                        with torch.inference_mode():
+                            ids = torch.tensor([[tid]], device=device, dtype=torch.long)
+                            hidden = embed(ids)
+                            hidden = run_forward(hidden, request_id, False, reset_kv=False)
                         data = hidden.cpu().half().numpy().tobytes()
                         shape = list(hidden.shape)
                         elapsed = time.time() - t0
@@ -309,8 +427,7 @@ def serve_model(args):
 
                     if mode == "clear_cache":
                         rid = req.get("request_id", "")
-                        if rid in kv_cache:
-                            del kv_cache[rid]
+                        kv_cache_state.pop(rid, None)
                         resp = json.dumps({"status": "ok"}).encode()
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
@@ -324,26 +441,27 @@ def serve_model(args):
                 import numpy as np
                 shape = json.loads(shape_str) if shape_str else [1, length // (config.hidden_size * 2), config.hidden_size]
                 arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
-                hidden = torch.from_numpy(arr.copy()).to(device)
-
                 is_generate = (mode == "generate")
-                hidden = run_forward(hidden, request_id, is_generate)
+                with torch.inference_mode():
+                    hidden = torch.from_numpy(arr.copy()).to(device)
+                    hidden = run_forward(hidden, request_id, is_generate, reset_kv=False)
+                    if is_generate and lm_head:
+                        logits = lm_head.float()(hidden.float())
+                        last_logits = logits[0, -1]  # [vocab_size]
+
+                        # Clean NaN/Inf from logits (caused by fp16 overflow in attention)
+                        nan_mask = torch.isnan(last_logits) | torch.isinf(last_logits)
+                        if nan_mask.any():
+                            print(f"WARNING: {nan_mask.sum().item()} NaN/Inf in logits, cleaning", file=sys.stderr)
+                            last_logits = torch.where(nan_mask, torch.tensor(-1e5, device=last_logits.device), last_logits)
+
+                        # Block token 0 ("!") — Qwen2 vocab id 0 is "!" which is almost
+                        # always a numerical artifact when argmax returns 0 from degraded states
+                        last_logits[0] = -1e5
+
+                        token_id = int(torch.argmax(last_logits).item())
 
                 if is_generate and lm_head:
-                    logits = lm_head.float()(hidden.float())
-                    last_logits = logits[0, -1]  # [vocab_size]
-
-                    # Clean NaN/Inf from logits (caused by fp16 overflow in attention)
-                    nan_mask = torch.isnan(last_logits) | torch.isinf(last_logits)
-                    if nan_mask.any():
-                        print(f"WARNING: {nan_mask.sum().item()} NaN/Inf in logits, cleaning", file=sys.stderr)
-                        last_logits = torch.where(nan_mask, torch.tensor(-1e5, device=last_logits.device), last_logits)
-
-                    # Block token 0 ("!") — Qwen2 vocab id 0 is "!" which is almost
-                    # always a numerical artifact when argmax returns 0 from degraded states
-                    last_logits[0] = -1e5
-
-                    token_id = int(torch.argmax(last_logits).item())
                     elapsed = time.time() - t0
                     resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
                     self.send_response(200)
@@ -372,7 +490,13 @@ def serve_model(args):
                 self.wfile.write(err)
 
     server = HTTPServer(("127.0.0.1", args.port), Handler)
-    print(json.dumps({"status": "ready", "port": args.port, "device": str(device), "layers": f"{args.layer_start}-{args.layer_end}"}))
+    print(json.dumps({
+        "status": "ready",
+        "port": args.port,
+        "device": str(device),
+        "layers": f"{args.layer_start}-{args.layer_end}",
+        "kv_incremental": DynamicCache is not None,
+    }))
     sys.stdout.flush()
     print(f"Serving on http://127.0.0.1:{args.port}", file=sys.stderr)
     server.serve_forever()

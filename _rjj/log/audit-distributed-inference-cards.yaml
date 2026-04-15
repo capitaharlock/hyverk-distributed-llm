@@ -1,0 +1,64 @@
+# Hyverk distributed inference — task cards (YAML for trackers / scripts)
+# Pair with: _rjj/log/AUDIT-distributed-inference.md
+version: 1
+audit_ref: AUDIT-distributed-inference.md
+updated: "2026-04-15"
+cards:
+  - id: DINF-001
+    title: Incremental KV decode across coordinator chain
+    priority: P0
+    category: algorithm
+    summary: >-
+      Replace per-token full InferenceStart with prefill once + decode steps
+      using per-request_id KV on each Python worker.
+    labels: [inference, coordinator, node_forward, performance]
+
+  - id: DINF-002
+    title: Causal mask and use_cache in run_forward
+    priority: P0
+    category: python
+    summary: >-
+      Avoid O(S^2) mask and full-sequence attention when KV is present; align
+      with HuggingFace Qwen2 decode semantics.
+    labels: [inference, node_forward, performance]
+
+  - id: DINF-003
+    title: Replace stdlib HTTPServer with async layer server
+    priority: P1
+    category: infra
+    summary: >-
+      uvicorn/FastAPI or gRPC on localhost:18100 for concurrency and lower
+      head-of-line blocking.
+    labels: [inference, python, scalability]
+
+  - id: DINF-004
+    title: Optional FlashAttention-2 on CUDA
+    priority: P1
+    category: performance
+    summary: >-
+      Feature-flag FA2 when torch/transformers support it; fallback SDPA/eager.
+    labels: [cuda, optional-dep]
+
+  - id: DINF-005
+    title: Sampling parity (temperature / top_p)
+    priority: P2
+    category: correctness
+    summary: >-
+      Implement or document greedy-only behavior for distributed generate.
+    labels: [api, quality]
+
+  - id: DINF-006
+    title: Hop-level telemetry (bytes, latency)
+    priority: P2
+    category: observability
+    summary: >-
+      Structured logs or metrics for WS + activation payload per token/hop.
+    labels: [observability, coordinator]
+
+  - id: DINF-007
+    title: Faster cold start weight load
+    priority: P3
+    category: startup
+    summary: >-
+      Evaluate mmap / direct-GPU safetensors load; measure startup delta.
+    labels: [inference, startup]

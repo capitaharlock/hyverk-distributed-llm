@@ -1,3 +1,37 @@
 hub: https://meshcore-relay.fly.dev
 join: https://meshcore-relay.fly.dev/join/d2d51e29947fc76a8f7c82705aa59d39
 project: meshkore
+
+# -----------------------------------------------------------------------------
+# Room / identity (read this)
+#
+# The long hex in the `join` URL path is your room invite token (like a
+# password). Whoever has this file—or the URL—can join that relay room. A
+# separate 6-digit code is NOT required by Meshcore for that link; the token
+# already authenticates the invite. If you want a simple human check between
+# teammates, agree on a 6-digit "coordination PIN" out-of-band (Signal, in
+# person) and say it once after joining—do NOT put a real PIN in git.
+#
+# "Master" / room setup: only the relay UI (or whoever operates fly.dev) can
+# create or own a room. Cursor/IDE agents do not keep a live Meshcore session;
+# you (or an operator) open the join URL, then paste instructions for others.
+#
+# If this repo is public or shared widely: rotate the join link on the relay,
+# remove the old URL from git history, and prefer a private copy of this file
+# (e.g. `.meshkore.local` gitignored + `.meshkore.example` in-repo without token).
+# -----------------------------------------------------------------------------
+
+# hyverk incremental KV (2026-04-15) — tell other agents to pull this repo
+# Coordinator + all GPU nodes must deploy together (new WS message types).
+# Python nodes need recent transformers (DynamicCache + create_causal_mask).
+# See _rjj/log/AUDIT-distributed-inference.md for context.
+
+# --- post-push: paste into Meshcore / team channel for other agents ---
+# REPO: asimovia/hiverk (pull latest main or your integration branch)
+# ALL-AT-ONCE: deploy coordinator + every GPU inference node on the same commit.
+# BUILD: cargo build -p hyverk-coordinator -p hyverk-node (needs protoc for hyverk-proto)
+# PYTHON: pip install -U "transformers>=4.45" torch ; restart node_forward serve on :18100
+# CHECK: server stdout JSON must include "kv_incremental": true after load
+# TEST: POST /api/v1/ws-inference with prompt + max_tokens>=8 ; compare tokens_per_sec vs prior commit
+# ITERATE: if embed_step 409/503, fix transformers version ; if NaNs, file issue with layer range + device
+# NOTE: Cursor/agents cannot dial meshcore-relay from here; humans paste this block into the relay UI.

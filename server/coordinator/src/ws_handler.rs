@@ -380,7 +380,9 @@ async fn route_forward_result(
 ) {
     let mut forwards = state.pending_forwards.write().await;
     if let Some(pending) = forwards.get_mut(request_id) {
-        pending.hidden_data = hidden_states.clone();
+        // Do not clone activations into `hidden_data` — it was unused and doubled RAM + memcpy
+        // per hop (activations are already large: seq_len × hidden × 2 bytes).
+        pending.hidden_data.clear();
         pending.current_step += 1;
 
         if pending.current_step < pending.chain.len() {
@@ -394,12 +396,33 @@ async fn route_forward_result(
                 is_last: next.is_last,
             };
             state.send_to_node(&next.node_id, msg).await;
-            // Send binary hidden states
-            let mut payload = request_id.as_bytes().to_vec();
+            // Send binary hidden states (36-byte request id prefix, padded — matches node client)
+            let mut payload = vec![0u8; 36];
+            let rid = request_id.as_bytes();
+            let n = rid.len().min(36);
+            payload[..n].copy_from_slice(&rid[..n]);
             payload.extend_from_slice(&hidden_states);
             state.send_binary_to_node(&next.node_id, payload).await;
         }
         // If last node, the TokenGenerated message handles completion
+    }
+}
+
+/// Tell each GPU node in `chain` to drop KV for this request (local `node_forward` clear_cache).
+pub async fn broadcast_inference_end(state: &Arc<WsState>, chain: &[ChainStep], request_id: &str) {
+    let rid = request_id.to_string();
+    let mut seen = std::collections::HashSet::new();
+    for step in chain {
+        if seen.insert(step.node_id.clone()) {
+            let _ = state
+                .send_to_node(
+                    &step.node_id,
+                    CoordinatorMessage::InferenceEnd {
+                        request_id: rid.clone(),
+                    },
+                )
+                .await;
+        }
     }
 }
 
@@ -414,39 +437,42 @@ async fn handle_generated_token(
         pending.generated.push(token_id);
 
         if is_eos || pending.generated.len() >= pending.max_tokens {
-            // Complete — send result
-            if let Some(tx) = pending.result_tx.take() {
-                let cluster_info: Vec<serde_json::Value> = pending
-                    .chain
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "node": s.node_id,
-                            "layers": format!("{}-{}", s.layer_start, s.layer_end),
-                            "position": if s.is_last { "last" } else { "first/middle" },
-                        })
+            // Snapshot then remove before notifying nodes (avoids holding the lock across sends).
+            let chain = pending.chain.clone();
+            let cluster_info: Vec<serde_json::Value> = pending
+                .chain
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "node": s.node_id,
+                        "layers": format!("{}-{}", s.layer_start, s.layer_end),
+                        "position": if s.is_last { "last" } else { "first/middle" },
                     })
-                    .collect();
+                })
+                .collect();
+            let generated_ids = pending.generated.clone();
+            let tokens = pending.generated.len();
+            let result_tx = pending.result_tx.take();
+            forwards.remove(request_id);
+            drop(forwards);
 
-                tx.send(InferenceResult {
-                    text: String::new(), // decoded by caller
-                    tokens: pending.generated.len(),
+            if let Some(tx) = result_tx {
+                let _ = tx.send(InferenceResult {
+                    text: String::new(),
+                    tokens,
                     elapsed_secs: 0.0,
                     cluster: cluster_info,
-                    generated_ids: pending.generated.clone(),
-                })
-                .ok();
+                    generated_ids,
+                });
             }
+            broadcast_inference_end(state, &chain, request_id).await;
         } else {
-            // Need more tokens — send full sequence (no KV cache, reliable output)
+            // Incremental decode: first node embeds only the last generated token (KV on workers).
             pending.current_step = 0;
             let first = &pending.chain[0];
-            let mut token_ids = pending.token_ids.clone();
-            token_ids.extend_from_slice(&pending.generated);
-
-            let msg = CoordinatorMessage::InferenceStart {
+            let msg = CoordinatorMessage::InferenceContinue {
                 request_id: request_id.to_string(),
-                token_ids,
+                new_token_id: token_id,
                 layer_start: first.layer_start,
                 layer_end: first.layer_end,
                 max_tokens: pending.max_tokens,

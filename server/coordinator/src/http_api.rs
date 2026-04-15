@@ -1303,11 +1303,23 @@ async fn ws_inference(
             })).into_response()
         }
         Ok(Err(_)) => {
-            state.ws_state.pending_forwards.write().await.remove(&request_id);
+            let chain_opt = {
+                let mut fw = state.ws_state.pending_forwards.write().await;
+                fw.remove(&request_id).map(|p| p.chain)
+            };
+            if let Some(ref chain) = chain_opt {
+                crate::ws_handler::broadcast_inference_end(&state.ws_state, chain, &request_id).await;
+            }
             Json(serde_json::json!({"error": "Inference channel closed unexpectedly"})).into_response()
         }
         Err(_) => {
-            state.ws_state.pending_forwards.write().await.remove(&request_id);
+            let chain_opt = {
+                let mut fw = state.ws_state.pending_forwards.write().await;
+                fw.remove(&request_id).map(|p| p.chain)
+            };
+            if let Some(ref chain) = chain_opt {
+                crate::ws_handler::broadcast_inference_end(&state.ws_state, chain, &request_id).await;
+            }
             Json(serde_json::json!({
                 "error": "Inference timed out (300s)",
                 "hint": "Nodes may still be downloading model weights"

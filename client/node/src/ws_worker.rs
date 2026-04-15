@@ -5,8 +5,25 @@
 
 use futures_util::{SinkExt, StreamExt};
 use hyverk_comms::messages::{ClientMessage, CoordinatorMessage};
+use std::sync::OnceLock;
+use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
+
+/// Single shared client for `127.0.0.1` layer inference (one request per generated token).
+/// Creating a new `reqwest::Client` each call drops the connection pool and forces new TCP
+/// handshakes to localhost — measurable latency on autoregressive decoding.
+fn local_inference_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(32)
+            .tcp_keepalive(Some(Duration::from_secs(120)))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("reqwest client for local inference")
+    })
+}
 
 /// Run the WebSocket worker loop. Reconnects on failure.
 pub async fn run_ws_worker(
@@ -288,6 +305,42 @@ async fn handle_coordinator_message(
             // Hidden states arrive as binary frame — handled in handle_binary_forward
             None
         }
+        CoordinatorMessage::InferenceContinue {
+            request_id,
+            new_token_id,
+            layer_start,
+            layer_end,
+            ..
+        } => {
+            info!(
+                request_id = %request_id,
+                new_token_id,
+                layers = format!("{layer_start}-{layer_end}"),
+                "Inference continue: single-token embed + forward"
+            );
+            match run_embed_step(model_dir, new_token_id, &request_id).await {
+                Ok((hidden_data, shape)) => {
+                    let msg = ClientMessage::ForwardResult {
+                        request_id: request_id.clone(),
+                        hidden_states: vec![],
+                        shape,
+                    };
+                    let mut payload = vec![0u8; 36];
+                    payload[..request_id.len().min(36)]
+                        .copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
+                    payload.extend_from_slice(&hidden_data);
+                    Some(WsResponse::TextAndBinary(msg, payload))
+                }
+                Err(e) => {
+                    error!(request_id = %request_id, "embed_step failed: {e}");
+                    None
+                }
+            }
+        }
+        CoordinatorMessage::InferenceEnd { request_id } => {
+            clear_local_kv_cache(&request_id).await;
+            None
+        }
         CoordinatorMessage::Ping => Some(WsResponse::Text(ClientMessage::Pong)),
         _ => None,
     }
@@ -313,12 +366,7 @@ async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsRespo
     // Call persistent inference server via HTTP
     let port = 18100u16;
     let url = format!("http://127.0.0.1:{port}");
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build() {
-        Ok(c) => c,
-        Err(e) => { error!("HTTP client error: {e}"); return None; }
-    };
+    let client = local_inference_http_client();
 
     // Send hidden states as raw binary with request ID for KV cache
     let hidden_size = 3584usize; // Qwen2.5-7B hidden size
@@ -448,9 +496,7 @@ async fn run_layer_forward(
 ) -> Result<(Vec<u8>, Vec<usize>), Box<dyn std::error::Error + Send + Sync>> {
     let port = 18100u16;
     let url = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
+    let client = local_inference_http_client();
 
     if is_first {
         // Embed mode: send token IDs, get hidden states back
@@ -502,6 +548,45 @@ async fn run_layer_forward(
             Ok((hidden_data, shape))
         }
     }
+}
+
+/// Incremental decode: embed one new token using KV cache on the local inference server.
+async fn run_embed_step(
+    _model_dir: &str,
+    new_token_id: u32,
+    request_id: &str,
+) -> Result<(Vec<u8>, Vec<usize>), Box<dyn std::error::Error + Send + Sync>> {
+    let port = 18100u16;
+    let url = format!("http://127.0.0.1:{port}");
+    let client = local_inference_http_client();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "mode": "embed_step",
+            "token_id": new_token_id,
+            "request_id": request_id,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Inference server unreachable: {e}. Is it running?"))?;
+    let shape_str = resp
+        .headers()
+        .get("X-Shape")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("[]")
+        .to_string();
+    let shape: Vec<usize> = serde_json::from_str(&shape_str).unwrap_or_default();
+    let hidden_data = resp.bytes().await?.to_vec();
+    Ok((hidden_data, shape))
+}
+
+async fn clear_local_kv_cache(request_id: &str) {
+    let client = local_inference_http_client();
+    let _ = client
+        .post("http://127.0.0.1:18100")
+        .json(&serde_json::json!({"mode": "clear_cache", "request_id": request_id}))
+        .send()
+        .await;
 }
 
 /// Legacy: Call Python subprocess (used only for download)

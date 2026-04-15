@@ -31,6 +31,19 @@ pub enum CoordinatorMessage {
         layer_end: usize,
         is_last: bool,
     },
+    /// Decode one new token on the first node after prefill (embed single `new_token_id` with KV cache).
+    InferenceContinue {
+        request_id: String,
+        new_token_id: u32,
+        layer_start: usize,
+        layer_end: usize,
+        max_tokens: usize,
+        temperature: f32,
+    },
+    /// Drop KV / state for `request_id` on this node (broadcast when a request finishes or aborts).
+    InferenceEnd {
+        request_id: String,
+    },
     /// Assign layers to this node (sent after GPU node registers)
     LayerAssignment {
         layer_start: usize,
