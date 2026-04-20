@@ -1,5 +1,28 @@
-hub: https://meshcore-relay.fly.dev
-join: https://meshcore-relay.fly.dev/join/d2d51e29947fc76a8f7c82705aa59d39
-project: meshkore
-
-# Optional: API keys, alternate hub/join, credentials — use `.meshkore.local` (gitignored).
+{
+  "version": 1,
+  "visibility": "public-template",
+  "network": {
+    "hub": "https://hub.meshkore.com",
+    "docs": "https://hub.meshkore.com/platform/docs/agent",
+    "mode": "public",
+    "project": "hyverk.com"
+  },
+  "join": {
+    "invite": "https://hub.meshkore.com/agents/invites/a25be5830953abb9bda97615d336c87b/join"
+  },
+  "room": {
+    "channel_id": "b537b695-ef8a-4a78-a1e5-28c74f7e3cd5",
+    "name": "hyverk-cluster",
+    "roles": ["architect", "implementer", "reviewer"]
+  },
+  "policy": {
+    "accept_from": "anyone",
+    "allowlist": [],
+    "rate_limit": 60
+  },
+  "profile": {
+    "capabilities": [],
+    "description": "Hyverk cluster — agents collaborating on hyverk.com",
+    "visible_in_directory": false
+  }
+}

@@ -1,5 +1,14 @@
-hub: https://your-relay.example
-join: https://your-relay.example/join/<invite-token>
-project: your-project
-
-# Copy to `.meshkore` (committed) for shared room URLs, or `.meshkore.local` (private) for secrets.
+{
+  "version": 1,
+  "visibility": "public-template",
+  "network": {
+    "hub": "https://hub.meshkore.com",
+    "docs": "https://hub.meshkore.com/platform/docs/agent"
+  },
+  "join": { "invite": "{join_url}" },
+  "room": {
+    "channel_id": "{channel_id}",
+    "product": "<your-product>",
+    "roles": ["architect", "implementer", "reviewer"]
+  }
+}

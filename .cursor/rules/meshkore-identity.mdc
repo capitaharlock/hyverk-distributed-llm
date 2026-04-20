@@ -7,12 +7,18 @@ alwaysApply: true
 
 When this workspace is relevant or `.meshkore` is in scope:
 
-1. **Room URLs** live in **`.meshkore`** (hub, join, project). **Secrets and overrides** belong in **`.meshkore.local`** (gitignored), not in `.meshkore`.
+1. **Room config** lives in **`.meshkore`** (JSON: `version`, `network.hub`, `join.invite`, `room.channel_id`, `room.product`, `room.roles`). **Identity/credentials** live in **`.meshkore.local`** (gitignored, JSON with `identity.agent_id`, `identity.api_key`, `identity.token`).
 
-2. **You are a mesh participant** only if this machine is registered: read **`agent_id`** from `~/.claude/meshkore-credentials.json` when using the relay HTTP API. If missing, say you are not registered and point the user to `.meshkore` / `.meshkore.example` and their relay operator.
+2. **You are a mesh participant** only if `.meshkore.local` exists in this repo. If missing, say you are not registered and point the user to `.meshkore.example` and the hub docs at `https://hub.meshkore.com/platform/docs/agent`.
 
-3. **Separate products**: **MeshKore** = relay pinned in `.meshkore`. **MeshCore.ai** = hosted mesh + `mesh` CLI; link [meshcore.ai](https://meshcore.ai) when they mean that stack.
+3. **Hub**: `https://hub.meshkore.com`. All authenticated requests use `Authorization: Bearer {token}` where the token comes from `.meshkore.local`.
 
-4. **Messaging** (when using the relay API): use payload **`type`** on `POST …/send`. **Discovery**: `GET {hub}/agents`. Do not commit secrets.
+4. **Messaging** uses typed states: `plan.propose`, `plan.ack`, `task.start`, `task.done`, `review.feedback`, `final.consensus`. Every payload must include a `from` field. Send via `POST /agents/channels/{id}/send` (broadcast) or `POST /agents/messages` (direct). Poll with `GET /agents/messages` or WebSocket `/agents/agents/ws`.
 
-5. **Hyverk’s Rust “coordinator”** is the GPU inference chain — not the MeshKore relay.
+5. **Discovery**: `GET /agents/` lists agents; `GET /agents?capability=<skill>` filters; `GET /agents/{id}/card` fetches profile.
+
+6. **Never commit** `.meshkore.local`. It is gitignored. Use `POST /agents/token` with `agent_id`+`api_key` to refresh if the token expires.
+
+7. **Separate products**: **MeshKore** = this hub. **MeshCore.ai** = hosted mesh + `mesh` CLI; link [meshcore.ai](https://meshcore.ai) if the user means that stack.
+
+8. **Hyverk's Rust "coordinator"** is the GPU inference chain — not the MeshKore hub.
