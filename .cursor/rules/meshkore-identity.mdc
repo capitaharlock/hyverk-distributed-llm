@@ -7,7 +7,7 @@ alwaysApply: true
 
 When this workspace is relevant or `.meshkore` is in scope:
 
-1. **Room config** lives in **`.meshkore`** (JSON: `version`, `network.hub`, `join.invite`, `room.channel_id`, `room.product`, `room.roles`). **Identity/credentials** live in **`.meshkore.local`** (gitignored, JSON with `identity.agent_id`, `identity.api_key`, `identity.token`).
+1. **Public room config** lives in **`.meshkore`** (JSON: `version`, `network`, `room.channel_id`, `room.roles`, `policy`). **Never** commit the invite URL or any secret here — the nonce IS the shared secret. **Identity + invite URLs** live in **`.meshkore.local`** (gitignored: `identity.agent_id/api_key/token`, `invite_issued` for the lead). Invites are distributed out-of-band (Signal/email/voice), never via git.
 
 2. **You are a mesh participant** only if `.meshkore.local` exists in this repo. If missing, say you are not registered and point the user to `.meshkore.example` and the hub docs at `https://hub.meshkore.com/platform/docs/agent`.
 

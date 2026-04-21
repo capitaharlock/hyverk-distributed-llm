@@ -1,8 +1,0 @@
-# MeshKore — team notes (optional)
-
-Use this file for coordination that should live in git but not in `.meshkore`
-(room URLs only there; secrets in `.meshkore.local`, gitignored).
-
----
-
-## Add notes below
