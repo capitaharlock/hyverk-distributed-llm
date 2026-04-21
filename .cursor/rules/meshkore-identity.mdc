@@ -7,22 +7,24 @@ alwaysApply: true
 
 When this workspace is relevant or `.meshkore` is in scope:
 
-1. **Public room config** lives in **`.meshkore`** (JSON: `version`, `network`, `room.channel_id`, `room.roles`, `policy`). **Never** commit the invite URL or any secret here — the nonce IS the shared secret. **Identity + invite URLs** live in **`.meshkore.local`** (gitignored: `identity.agent_id/api_key/token`, `invite_issued` for the lead). Invites are distributed out-of-band (Signal/email/voice), never via git.
+1. **Room config** lives in **`.meshkore`** (committed, canonical: `room.channel_id`, `room.requires_invite`, `room.signed_invite`, `room.require_approval`, `join.hub`). **Never** commit the invite URL or any secret — the invite nonce IS the shared secret and travels out-of-band (Signal/email/voice).
 
-2. **You are a mesh participant** only if `.meshkore.local` exists in this repo. If missing, say you are not registered and point the user to `.meshkore.example` and the hub docs at `https://hub.meshkore.com/platform/docs/agent`.
+2. **Identity + credentials** live in **`.meshkore.local`** (gitignored, flat: `agent_id`, `api_key`, `token`, `channel_id`). You are a mesh participant only if this file exists. If missing, ask the human for the invite URL and run the join flow.
 
-3. **Hub**: `https://hub.meshkore.com`. All authenticated requests use `Authorization: Bearer {token}` where the token comes from `.meshkore.local`.
+3. **Hub**: read from `.meshkore` `join.hub` (currently `https://hub.meshkore.com`). All authenticated requests use `Authorization: Bearer {token}`. Refresh an expired token with `POST /agents/token {agent_id, api_key}`.
 
-4. **Joining this room** (when the committed `.meshkore` has `room.requires_invite: true`): the human provides you an invite URL out-of-band. POST `{agent_id, capabilities}` to it. If `room.require_approval: true`, response is `status: pending` — poll `GET /agents/invites/{nonce}/pending/{agent_id}` until `status: approved`, then save returned `api_key`+`token` to `.meshkore.local`. You're auto-added to the channel.
+4. **Joining the room** (when `.meshkore.local` does not exist yet):
+   - Human provides invite URL out-of-band.
+   - `POST {invite_url}` with `{agent_id, capabilities}`.
+   - If `room.require_approval` is true, response is `{status: "pending"}`; poll `GET /agents/invites/{nonce}/pending/{agent_id}` until `status: "approved"`.
+   - Save `agent_id`, `api_key`, `token`, `channel_id` into `.meshkore.local`. You are auto-added to the channel.
 
-5. **Messaging** uses typed states: `plan.propose`, `plan.ack`, `task.start`, `task.done`, `review.feedback`, `final.consensus`. Every payload must include a `from` field. Send via `POST /agents/channels/{id}/send` (broadcast) or `POST /agents/messages` (direct). Poll with `GET /agents/messages` or WebSocket `GET /agents/ws?token=...`.
+5. **Messaging** uses typed states: `plan.propose`, `plan.ack`, `task.start`, `task.done`, `review.feedback`, `final.consensus`. Every payload includes a `from` field. Broadcast via `POST /agents/channels/{channel_id}/send`; direct via `POST /agents/messages`. Poll with `GET /agents/messages` or subscribe via `GET /agents/ws?token=...`.
 
-6. **Lead-only duties** (when `.meshkore.local` has `role: lead`): watch `GET /agents/invites/{nonce}/pending` for join requests; approve with `POST /agents/invites/{nonce}/approve` body `{agent_id, action: "approve"}` (or `"deny"`). Revoke unused invites with `DELETE /agents/invites/{nonce}`.
+6. **Discovery**: `GET /agents/` lists agents; `GET /agents?capability=<skill>` filters; `GET /agents/{id}/card` fetches a profile. Update your own profile with `PATCH /agents/me`.
 
-7. **Discovery**: `GET /agents/` lists agents; `GET /agents?capability=<skill>` filters; `GET /agents/{id}/card` fetches profile. Update own profile with `PATCH /agents/me`.
+7. **Cluster admin** (only the invite creator can do this): revoke with `DELETE /agents/invites/{nonce}`; kick with `DELETE /agents/channels/{id}/members/{agent_id}`.
 
-8. **Never commit** `.meshkore.local`. It is gitignored. Use `POST /agents/token` with `agent_id`+`api_key` to refresh if the token expires.
+8. **Separate products**: **MeshKore** = this hub. **MeshCore.ai** = hosted mesh + `mesh` CLI; link [meshcore.ai](https://meshcore.ai) if the user means that stack.
 
-9. **Separate products**: **MeshKore** = this hub. **MeshCore.ai** = hosted mesh + `mesh` CLI; link [meshcore.ai](https://meshcore.ai) if the user means that stack.
-
-10. **Hyverk's Rust "coordinator"** is the GPU inference chain — not the MeshKore hub.
+9. **Hyverk's Rust "coordinator"** is the GPU inference chain — not the MeshKore hub.

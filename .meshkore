@@ -1,22 +1,11 @@
 {
-  "version": 1,
-  "visibility": "public-template",
-  "network": {
-    "hub": "https://hub.meshkore.com",
-    "docs": "https://hub.meshkore.com/platform/docs/agent",
-    "mode": "public",
-    "project": "hyverk.com"
-  },
   "room": {
-    "channel_id": "b537b695-ef8a-4a78-a1e5-28c74f7e3cd5",
-    "name": "hyverk-cluster",
-    "roles": ["architect", "implementer", "reviewer"],
+    "channel_id": "64a2cfe0-7b86-4335-93cc-f3d6fcf672cb",
     "requires_invite": true,
-    "require_approval": true
+    "signed_invite": false,
+    "require_approval": false
   },
-  "policy": {
-    "accept_from": "anyone",
-    "allowlist": [],
-    "rate_limit": 60
+  "join": {
+    "hub": "https://hub.meshkore.com"
   }
 }
