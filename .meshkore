@@ -10,7 +10,9 @@
   "room": {
     "channel_id": "b537b695-ef8a-4a78-a1e5-28c74f7e3cd5",
     "name": "hyverk-cluster",
-    "roles": ["architect", "implementer", "reviewer"]
+    "roles": ["architect", "implementer", "reviewer"],
+    "requires_invite": true,
+    "require_approval": true
   },
   "policy": {
     "accept_from": "anyone",
