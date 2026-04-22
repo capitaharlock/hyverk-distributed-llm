@@ -18,6 +18,31 @@ COMPILE_MODE = os.environ.get("HYVERK_COMPILE_MODE", "reduce-overhead")
 FLASH_ATTN = bool(os.environ.get("HYVERK_FLASH_ATTN"))
 
 
+def _env_float(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return default
+    try:
+        return float(v)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return default
+    try:
+        return int(v)
+    except ValueError:
+        return default
+
+
+DEFAULT_TEMPERATURE = _env_float("HYVERK_TEMPERATURE", 0.0)
+DEFAULT_TOP_P = _env_float("HYVERK_TOP_P", 1.0)
+DEFAULT_TOP_K = _env_int("HYVERK_TOP_K", 0)
+
+
 def _sample_next_token(last_logits, temperature, top_p, top_k):
     """Pick the next token id from a 1-D logits vector (shape [vocab_size]).
 
@@ -593,8 +618,11 @@ def serve_model(args):
                 arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
                 is_generate = (mode == "generate")
 
-                # Sampling params — default temperature=0 preserves argmax behaviour.
-                # Coordinator sets these per request; unset = greedy.
+                # Sampling params. Precedence:
+                #   per-request header  >  HYVERK_* env default  >  argmax (0.0 / 1.0 / 0)
+                # Coordinator can override per-request via X-Temperature etc.; operators
+                # who want cluster-wide non-greedy behaviour without touching Rust today
+                # set HYVERK_TEMPERATURE on the last-node box.
                 def _fhdr(name, default):
                     v = self.headers.get(name)
                     try: return float(v) if v is not None and v != "" else default
@@ -603,9 +631,9 @@ def serve_model(args):
                     v = self.headers.get(name)
                     try: return int(v) if v is not None and v != "" else default
                     except ValueError: return default
-                temperature = _fhdr("X-Temperature", 0.0)
-                top_p       = _fhdr("X-Top-P", 1.0)
-                top_k       = _ihdr("X-Top-K", 0)
+                temperature = _fhdr("X-Temperature", DEFAULT_TEMPERATURE)
+                top_p       = _fhdr("X-Top-P", DEFAULT_TOP_P)
+                top_k       = _ihdr("X-Top-K", DEFAULT_TOP_K)
 
                 with torch.inference_mode():
                     hidden = torch.from_numpy(arr.copy()).to(device)

@@ -42,6 +42,9 @@ All flags are opt-in. Unset = current default behaviour.
 | `HYVERK_COMPILE=1`      | Wrap each `Qwen2DecoderLayer` in `torch.compile(mode=…, fullgraph=False, dynamic=True)`. CUDA-only; logs and skips on MPS/CPU. First forward pass pays the compile cost. | DINF-005 |
 | `HYVERK_COMPILE_MODE`   | Inductor mode — default `reduce-overhead` (good for small-batch decode). Can be `max-autotune` for prefill-heavy loads. Ignored unless `HYVERK_COMPILE=1`. | DINF-005 |
 | `HYVERK_FLASH_ATTN=1`   | Set `config._attn_implementation="flash_attention_2"` on layer construction. Requires the `flash-attn` package and a CUDA device; falls back to SDPA silently otherwise. CPU path is unaffected (pinned to eager + int8 dynamic quant). | DINF-004 |
+| `HYVERK_TEMPERATURE`    | Default sampling temperature for the generate path. Header `X-Temperature` wins if present. `0.0` (default) = argmax / greedy. | DINF-009 |
+| `HYVERK_TOP_P`          | Default nucleus-sampling top-p. `1.0` (default) = no filter. Overridden by `X-Top-P` header. | DINF-009 |
+| `HYVERK_TOP_K`          | Default top-k filter for sampling. `0` (default) = no filter. Overridden by `X-Top-K` header. | DINF-009 |
 
 ## HTTP contract (serve mode)
 

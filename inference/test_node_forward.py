@@ -217,6 +217,36 @@ def test_sampler():
     print(f"sampler tests: OK (argmax={argmax_id}, varied draws={len(draws)})")
 
 
+def test_sampling_env_defaults():
+    """HYVERK_TEMPERATURE / HYVERK_TOP_P / HYVERK_TOP_K parse into the module
+    constants at import time, and bad values fall back to the safe default."""
+    for k, v in [("HYVERK_TEMPERATURE", "0.7"),
+                 ("HYVERK_TOP_P", "0.9"),
+                 ("HYVERK_TOP_K", "50")]:
+        os.environ[k] = v
+    spec = importlib.util.spec_from_file_location(
+        "nf_sampling_env", os.path.join(ROOT, "node_forward.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert abs(mod.DEFAULT_TEMPERATURE - 0.7) < 1e-9, mod.DEFAULT_TEMPERATURE
+    assert abs(mod.DEFAULT_TOP_P - 0.9) < 1e-9, mod.DEFAULT_TOP_P
+    assert mod.DEFAULT_TOP_K == 50, mod.DEFAULT_TOP_K
+
+    # Malformed values should not crash — fall back to defaults
+    os.environ["HYVERK_TEMPERATURE"] = "not-a-number"
+    os.environ["HYVERK_TOP_K"] = "3.14"  # int parse will fail → default 0
+    spec2 = importlib.util.spec_from_file_location(
+        "nf_sampling_env_bad", os.path.join(ROOT, "node_forward.py"))
+    mod2 = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mod2)
+    assert mod2.DEFAULT_TEMPERATURE == 0.0, mod2.DEFAULT_TEMPERATURE
+    assert mod2.DEFAULT_TOP_K == 0, mod2.DEFAULT_TOP_K
+
+    for k in ("HYVERK_TEMPERATURE", "HYVERK_TOP_P", "HYVERK_TOP_K"):
+        os.environ.pop(k, None)
+    print("sampling env defaults: OK")
+
+
 def test_flash_attn_env_gate():
     """HYVERK_FLASH_ATTN reads at import; default off keeps SDPA path unchanged."""
     spec = importlib.util.spec_from_file_location(
@@ -341,6 +371,7 @@ def test_health_endpoint_lockfree_during_inference():
 
 if __name__ == "__main__":
     test_sampler()
+    test_sampling_env_defaults()
     test_compile_env_gate()
     test_flash_attn_env_gate()
     test_debug_nan_env_gate()
