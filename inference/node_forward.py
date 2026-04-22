@@ -43,6 +43,27 @@ DEFAULT_TOP_P = _env_float("HYVERK_TOP_P", 1.0)
 DEFAULT_TOP_K = _env_int("HYVERK_TOP_K", 0)
 
 
+def _lru_evict(od, max_entries, log_prefix="KV cache"):
+    """Pop least-recently-used entries from an OrderedDict until size <= max_entries.
+
+    Relies on the standard OrderedDict contract: popitem(last=False) removes
+    from the front (oldest / LRU). Callers are expected to move_to_end on every
+    access so "LRU" tracks actual use, not just insertion order.
+
+    Returns the list of evicted keys in eviction order (mostly useful for tests).
+    """
+    evicted = []
+    while len(od) > max_entries:
+        k, _ = od.popitem(last=False)
+        evicted.append(k)
+        if log_prefix:
+            print(
+                f"{log_prefix} LRU eviction: dropped {k} (over capacity {max_entries})",
+                file=sys.stderr,
+            )
+    return evicted
+
+
 def _sample_next_token(last_logits, temperature, top_p, top_k):
     """Pick the next token id from a 1-D logits vector (shape [vocab_size]).
 
@@ -341,9 +362,22 @@ def serve_model(args):
         create_causal_mask = None
         create_sliding_window_causal_mask = None
 
-    # request_id -> {"cache": DynamicCache} (incremental decode; needs recent transformers + Qwen2)
-    kv_cache_state = {}
-    MAX_CACHE_ENTRIES = 8
+    # request_id -> {"cache": DynamicCache, "last_access": ts}. OrderedDict gives
+    # us O(1) LRU via move_to_end on every access. Old behaviour was FIFO via
+    # next(iter(dict)), which would evict a long-running active request just
+    # because it was created first. HYVERK_KV_MAX_ENTRIES tunes the budget.
+    from collections import OrderedDict
+    kv_cache_state = OrderedDict()
+    MAX_CACHE_ENTRIES = max(1, _env_int("HYVERK_KV_MAX_ENTRIES", 8))
+
+    def _touch(rid):
+        """Mark request_id as most-recently-used (no-op if not present)."""
+        if rid in kv_cache_state:
+            kv_cache_state.move_to_end(rid)
+
+    def _evict_if_over_capacity():
+        """Drop the least-recently-used entries until we're at budget."""
+        _lru_evict(kv_cache_state, MAX_CACHE_ENTRIES, log_prefix="KV cache")
 
     # Serialises all GPU work across concurrent HTTP threads. /health and other
     # non-model endpoints stay lock-free so they stay responsive during inference.
@@ -412,8 +446,10 @@ def serve_model(args):
             kv_cache_state.pop(request_id, None)
         if request_id not in kv_cache_state:
             kv_cache_state[request_id] = {"cache": DynamicCache(config=config)}
-            while len(kv_cache_state) > MAX_CACHE_ENTRIES:
-                kv_cache_state.pop(next(iter(kv_cache_state)))
+            _evict_if_over_capacity()
+        else:
+            # LRU bump — this request is being actively used, keep it warm.
+            _touch(request_id)
         past_key_values = kv_cache_state[request_id]["cache"]
         past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
         position_ids = torch.arange(

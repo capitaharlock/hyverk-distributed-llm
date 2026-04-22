@@ -217,6 +217,58 @@ def test_sampler():
     print(f"sampler tests: OK (argmax={argmax_id}, varied draws={len(draws)})")
 
 
+def test_lru_evict():
+    """_lru_evict drops the least-recently-used entry, respects move_to_end,
+    and returns [] when under capacity."""
+    from collections import OrderedDict
+    spec = importlib.util.spec_from_file_location(
+        "nf_lru", os.path.join(ROOT, "node_forward.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    lru = mod._lru_evict
+
+    # Under capacity → nothing evicted
+    d = OrderedDict([("a", 1), ("b", 2)])
+    assert lru(d, 3, log_prefix="") == []
+    assert list(d) == ["a", "b"]
+
+    # Over capacity, default LRU order (insertion) → a evicted first
+    d = OrderedDict([("a", 1), ("b", 2), ("c", 3)])
+    evicted = lru(d, 2, log_prefix="")
+    assert evicted == ["a"], evicted
+    assert list(d) == ["b", "c"]
+
+    # With move_to_end on 'a', it becomes newest → 'b' evicted
+    d = OrderedDict([("a", 1), ("b", 2), ("c", 3)])
+    d.move_to_end("a")
+    evicted = lru(d, 2, log_prefix="")
+    assert evicted == ["b"], evicted
+    assert list(d) == ["c", "a"]
+
+    # max_entries=0 evicts everything
+    d = OrderedDict([("a", 1), ("b", 2)])
+    evicted = lru(d, 0, log_prefix="")
+    assert evicted == ["a", "b"]
+    assert len(d) == 0
+    print("_lru_evict tests: OK")
+
+
+def test_kv_max_entries_env():
+    """HYVERK_KV_MAX_ENTRIES clamps to >=1 and falls back on bad values."""
+    # Not directly testable at import because MAX_CACHE_ENTRIES is a serve_model
+    # local. We test the _env_int parser which backs it.
+    spec = importlib.util.spec_from_file_location(
+        "nf_kvmax", os.path.join(ROOT, "node_forward.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._env_int("__never_set__", 8) == 8
+    os.environ["__HV_TEST_INT"] = "16"; assert mod._env_int("__HV_TEST_INT", 8) == 16
+    os.environ["__HV_TEST_INT"] = ""; assert mod._env_int("__HV_TEST_INT", 8) == 8
+    os.environ["__HV_TEST_INT"] = "not-int"; assert mod._env_int("__HV_TEST_INT", 8) == 8
+    del os.environ["__HV_TEST_INT"]
+    print("HYVERK_KV_MAX_ENTRIES parse: OK")
+
+
 def test_sampling_env_defaults():
     """HYVERK_TEMPERATURE / HYVERK_TOP_P / HYVERK_TOP_K parse into the module
     constants at import time, and bad values fall back to the safe default."""
@@ -371,6 +423,8 @@ def test_health_endpoint_lockfree_during_inference():
 
 if __name__ == "__main__":
     test_sampler()
+    test_lru_evict()
+    test_kv_max_entries_env()
     test_sampling_env_defaults()
     test_compile_env_gate()
     test_flash_attn_env_gate()
