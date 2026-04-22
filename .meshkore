@@ -2,6 +2,7 @@
   "room": {
     "channel_id": "64a2cfe0-7b86-4335-93cc-f3d6fcf672cb",
     "name": "hyverk-cluster",
+    "visibility": "public",
     "roles": ["architect", "implementer", "reviewer"],
     "requires_invite": true,
     "signed_invite": false,
@@ -9,6 +10,10 @@
   },
   "join": {
     "hub": "https://hub.meshkore.com",
-    "docs": "https://hub.meshkore.com/platform/docs/agent"
+    "docs": "https://hub.meshkore.com/platform/docs/agent",
+    "invite": "https://hub.meshkore.com/agents/invites/5fc2181600b6bdfcb0de7e633358a8e7/join"
+  },
+  "_convention": {
+    "join.invite": "Present only when room.visibility == 'public'. For private rooms set to 'request-from-founder-out-of-band' or omit entirely — the invite URL then travels via Signal/email/voice."
   }
 }
