@@ -217,6 +217,24 @@ def test_sampler():
     print(f"sampler tests: OK (argmax={argmax_id}, varied draws={len(draws)})")
 
 
+def test_flash_attn_env_gate():
+    """HYVERK_FLASH_ATTN reads at import; default off keeps SDPA path unchanged."""
+    spec = importlib.util.spec_from_file_location(
+        "nf_flash", os.path.join(ROOT, "node_forward.py"))
+    os.environ["HYVERK_FLASH_ATTN"] = "1"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.FLASH_ATTN is True
+    del os.environ["HYVERK_FLASH_ATTN"]
+
+    spec2 = importlib.util.spec_from_file_location(
+        "nf_flash_off", os.path.join(ROOT, "node_forward.py"))
+    mod2 = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mod2)
+    assert mod2.FLASH_ATTN is False
+    print("FlashAttention-2 env gate: OK")
+
+
 def test_compile_env_gate():
     """HYVERK_COMPILE reads at import; COMPILE_LAYERS True only when env is set.
     The actual torch.compile pass is a no-op on CPU/MPS so safe to leave gated."""
@@ -324,6 +342,7 @@ def test_health_endpoint_lockfree_during_inference():
 if __name__ == "__main__":
     test_sampler()
     test_compile_env_gate()
+    test_flash_attn_env_gate()
     test_debug_nan_env_gate()
     test_health_endpoint_lockfree_during_inference()
     unittest.main(verbosity=2, exit=True)

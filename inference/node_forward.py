@@ -15,6 +15,7 @@ import argparse, json, os, sys, time
 DEBUG_NAN = bool(os.environ.get("HYVERK_DEBUG_NAN"))
 COMPILE_LAYERS = bool(os.environ.get("HYVERK_COMPILE"))
 COMPILE_MODE = os.environ.get("HYVERK_COMPILE_MODE", "reduce-overhead")
+FLASH_ATTN = bool(os.environ.get("HYVERK_FLASH_ATTN"))
 
 
 def _sample_next_token(last_logits, temperature, top_p, top_k):
@@ -190,6 +191,28 @@ def load_model_layers(args):
         config._attn_implementation = "eager"
     else:
         config._attn_implementation = "sdpa"
+        # Optional FlashAttention-2 — strictly opt-in (HYVERK_FLASH_ATTN=1) because
+        # it requires the flash-attn package AND a CUDA device. We fall back to SDPA
+        # silently when either is missing, so a misconfigured env var never breaks
+        # the node — it just logs a message.
+        if FLASH_ATTN and device.type == "cuda":
+            try:
+                import flash_attn  # noqa: F401 — presence check
+                config._attn_implementation = "flash_attention_2"
+                ver = getattr(flash_attn, "__version__", "?")
+                print(f"FlashAttention-2 enabled (flash-attn {ver})", file=sys.stderr)
+            except ImportError:
+                print(
+                    "HYVERK_FLASH_ATTN set but flash-attn is not installed; "
+                    "falling back to SDPA",
+                    file=sys.stderr,
+                )
+        elif FLASH_ATTN:
+            print(
+                f"HYVERK_FLASH_ATTN set but device={device.type}; "
+                f"FlashAttention-2 requires CUDA — using SDPA",
+                file=sys.stderr,
+            )
 
     weights = {}
     loaded_shards = set()
