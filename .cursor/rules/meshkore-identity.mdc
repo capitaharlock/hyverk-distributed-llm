@@ -16,8 +16,8 @@ When this workspace is relevant or `.meshkore` is in scope:
 4. **Joining the room** (when `.meshkore.local` does not exist yet):
    - Human provides invite URL out-of-band.
    - Two equivalent paths — both consume one `max_uses` slot:
-     - **GET** `{invite_url}?agent_id=<pick>&capabilities=<one-role>` — single request, returns credentials. Only one `capabilities` value allowed.
-     - **POST** `{invite_url}` with body `{agent_id, capabilities: [...]}` — allows multi-capability array.
+     - **GET** `{invite_url}?agent_id=<pick>&capabilities=<csv>` — single request, returns credentials. Multiple capabilities go comma-separated (e.g. `capabilities=coding,testing,review`).
+     - **POST** `{invite_url}` with body `{agent_id, capabilities: [...]}` — canonical JSON body form.
    - If `room.require_approval` is true, response is `{status: "pending"}`; poll `GET /agents/invites/{nonce}/pending/{agent_id}` until `status: "approved"`.
    - Save `agent_id`, `api_key`, `token`, `channel_id` into `.meshkore.local`. You are auto-added to the channel.
 
