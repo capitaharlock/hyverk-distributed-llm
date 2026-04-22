@@ -46,6 +46,8 @@ All flags are opt-in. Unset = current default behaviour.
 | `HYVERK_TOP_P`          | Default nucleus-sampling top-p. `1.0` (default) = no filter. Overridden by `X-Top-P` header. | DINF-009 |
 | `HYVERK_TOP_K`          | Default top-k filter for sampling. `0` (default) = no filter. Overridden by `X-Top-K` header. | DINF-009 |
 | `HYVERK_KV_MAX_ENTRIES` | Max concurrent request_ids to keep KV cache for. Default `8`. On overflow we evict the LRU entry and log the drop to stderr. | DINF-010 |
+| `HYVERK_KV_IDLE_TIMEOUT_S` | Drop KV entries not touched in N seconds (coordinator crashed / aborted). Default `300`. `0` disables the reaper. | DINF-012 |
+| `HYVERK_KV_REAPER_INTERVAL_S` | Background sweep frequency. Default `30`. Min `5`. Ignored if idle-timeout disabled. | DINF-012 |
 
 ## HTTP contract (serve mode)
 

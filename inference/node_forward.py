@@ -374,6 +374,7 @@ def serve_model(args):
         """Mark request_id as most-recently-used (no-op if not present)."""
         if rid in kv_cache_state:
             kv_cache_state.move_to_end(rid)
+            kv_cache_state[rid]["last_access"] = time.time()
 
     def _evict_if_over_capacity():
         """Drop the least-recently-used entries until we're at budget."""
@@ -383,6 +384,53 @@ def serve_model(args):
     # non-model endpoints stay lock-free so they stay responsive during inference.
     model_lock = threading.Lock()
     started_at = time.time()
+
+    # Idle timeout: drop KV entries not touched for N seconds. Prevents leaks
+    # when a coordinator drops a request without sending InferenceEnd (client
+    # crash, network drop). HYVERK_KV_IDLE_TIMEOUT_S=0 disables the reaper.
+    # HYVERK_KV_REAPER_INTERVAL_S controls sweep frequency (min 5s).
+    IDLE_TIMEOUT_S = max(0, _env_int("HYVERK_KV_IDLE_TIMEOUT_S", 300))
+    REAPER_INTERVAL_S = max(5, _env_int("HYVERK_KV_REAPER_INTERVAL_S", 30))
+
+    def _reap_idle_kv():
+        """Background sweeper — drops entries untouched for IDLE_TIMEOUT_S."""
+        while True:
+            try:
+                time.sleep(REAPER_INTERVAL_S)
+                if IDLE_TIMEOUT_S <= 0 or not kv_cache_state:
+                    continue
+                now = time.time()
+                # Grab the model_lock so we don't race with in-flight inference
+                # mutating kv_cache_state. /health reads lock-free; that's OK —
+                # it only snapshots counters, never dereferences the caches.
+                if not model_lock.acquire(timeout=5):
+                    continue
+                try:
+                    stale = [
+                        rid for rid, entry in list(kv_cache_state.items())
+                        if now - entry.get("last_access", now) > IDLE_TIMEOUT_S
+                    ]
+                    for rid in stale:
+                        kv_cache_state.pop(rid, None)
+                        print(
+                            f"KV cache idle-timeout eviction: dropped {rid} "
+                            f"(idle > {IDLE_TIMEOUT_S}s)",
+                            file=sys.stderr,
+                        )
+                finally:
+                    model_lock.release()
+            except Exception as e:
+                # Reaper crashing must not take the server down.
+                print(f"KV reaper warning: {e}", file=sys.stderr)
+
+    if IDLE_TIMEOUT_S > 0:
+        t = threading.Thread(target=_reap_idle_kv, daemon=True, name="kv-reaper")
+        t.start()
+        print(
+            f"KV cache idle-reaper: timeout={IDLE_TIMEOUT_S}s "
+            f"interval={REAPER_INTERVAL_S}s",
+            file=sys.stderr,
+        )
 
     # Warmup pass with use_cache=True to compile kernels
     print("Running warmup pass...", file=sys.stderr)
@@ -445,7 +493,10 @@ def serve_model(args):
         if reset_kv:
             kv_cache_state.pop(request_id, None)
         if request_id not in kv_cache_state:
-            kv_cache_state[request_id] = {"cache": DynamicCache(config=config)}
+            kv_cache_state[request_id] = {
+                "cache": DynamicCache(config=config),
+                "last_access": time.time(),
+            }
             _evict_if_over_capacity()
         else:
             # LRU bump — this request is being actively used, keep it warm.

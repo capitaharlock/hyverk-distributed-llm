@@ -217,6 +217,70 @@ def test_sampler():
     print(f"sampler tests: OK (argmax={argmax_id}, varied draws={len(draws)})")
 
 
+def test_idle_reaper_env_gate():
+    """Parse HYVERK_KV_IDLE_TIMEOUT_S + HYVERK_KV_REAPER_INTERVAL_S via _env_int."""
+    spec = importlib.util.spec_from_file_location(
+        "nf_idle", os.path.join(ROOT, "node_forward.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._env_int("HYVERK_KV_IDLE_TIMEOUT_S", 300) == 300
+    os.environ["HYVERK_KV_IDLE_TIMEOUT_S"] = "0"
+    assert mod._env_int("HYVERK_KV_IDLE_TIMEOUT_S", 300) == 0
+    os.environ["HYVERK_KV_IDLE_TIMEOUT_S"] = "15"
+    assert mod._env_int("HYVERK_KV_IDLE_TIMEOUT_S", 300) == 15
+    os.environ["HYVERK_KV_IDLE_TIMEOUT_S"] = "bad"
+    assert mod._env_int("HYVERK_KV_IDLE_TIMEOUT_S", 300) == 300
+    del os.environ["HYVERK_KV_IDLE_TIMEOUT_S"]
+    print("idle-reaper env gate: OK")
+
+
+def test_idle_reaper_logic():
+    """Simulate the reaper's core drop-stale loop and verify semantics:
+    - entries idle > TIMEOUT are dropped, fresh ones kept
+    - HYVERK_KV_IDLE_TIMEOUT_S=0 disables reaping
+    - LRU order preserved after reap
+    """
+    from collections import OrderedDict
+    import time as _time
+
+    def reap(state, timeout_s, now_fn=_time.time):
+        if timeout_s <= 0 or not state:
+            return []
+        now = now_fn()
+        stale = [rid for rid, e in list(state.items()) if now - e.get("last_access", now) > timeout_s]
+        for rid in stale:
+            state.pop(rid, None)
+        return stale
+
+    # Three entries with decreasing freshness
+    now = 1000.0
+    state = OrderedDict()
+    state["old"]   = {"cache": None, "last_access": now - 600}  # 10 min old
+    state["mid"]   = {"cache": None, "last_access": now - 200}  # 3.3 min
+    state["fresh"] = {"cache": None, "last_access": now - 10}   # 10s
+
+    # timeout 300s → only "old" goes
+    evicted = reap(state, 300, now_fn=lambda: now)
+    assert evicted == ["old"], evicted
+    assert list(state) == ["mid", "fresh"]
+
+    # timeout 0 → disabled, no-op even with super-stale state
+    state["zombie"] = {"cache": None, "last_access": 0.0}
+    evicted = reap(state, 0, now_fn=lambda: now)
+    assert evicted == []
+    assert "zombie" in state
+
+    # timeout 5 with current now → all go except the one we touch
+    state.clear()
+    state["a"] = {"cache": None, "last_access": now - 10}
+    state["b"] = {"cache": None, "last_access": now - 2}
+    evicted = reap(state, 5, now_fn=lambda: now)
+    assert evicted == ["a"]
+    assert list(state) == ["b"]
+
+    print("idle-reaper logic: OK")
+
+
 def test_lru_evict():
     """_lru_evict drops the least-recently-used entry, respects move_to_end,
     and returns [] when under capacity."""
@@ -424,6 +488,8 @@ def test_health_endpoint_lockfree_during_inference():
 if __name__ == "__main__":
     test_sampler()
     test_lru_evict()
+    test_idle_reaper_env_gate()
+    test_idle_reaper_logic()
     test_kv_max_entries_env()
     test_sampling_env_defaults()
     test_compile_env_gate()
