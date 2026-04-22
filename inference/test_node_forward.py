@@ -217,6 +217,29 @@ def test_sampler():
     print(f"sampler tests: OK (argmax={argmax_id}, varied draws={len(draws)})")
 
 
+def test_compile_env_gate():
+    """HYVERK_COMPILE reads at import; COMPILE_LAYERS True only when env is set.
+    The actual torch.compile pass is a no-op on CPU/MPS so safe to leave gated."""
+    spec = importlib.util.spec_from_file_location(
+        "nf_compile", os.path.join(ROOT, "node_forward.py"))
+    os.environ["HYVERK_COMPILE"] = "1"
+    os.environ["HYVERK_COMPILE_MODE"] = "max-autotune"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.COMPILE_LAYERS is True
+    assert mod.COMPILE_MODE == "max-autotune"
+    del os.environ["HYVERK_COMPILE"]
+    del os.environ["HYVERK_COMPILE_MODE"]
+
+    spec2 = importlib.util.spec_from_file_location(
+        "nf_compile_off", os.path.join(ROOT, "node_forward.py"))
+    mod2 = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mod2)
+    assert mod2.COMPILE_LAYERS is False
+    assert mod2.COMPILE_MODE == "reduce-overhead"  # default
+    print("torch.compile env gate: OK")
+
+
 def test_debug_nan_env_gate():
     """Verify the HYVERK_DEBUG_NAN env var toggle is read at import time."""
     spec = importlib.util.spec_from_file_location(
@@ -300,6 +323,7 @@ def test_health_endpoint_lockfree_during_inference():
 
 if __name__ == "__main__":
     test_sampler()
+    test_compile_env_gate()
     test_debug_nan_env_gate()
     test_health_endpoint_lockfree_during_inference()
     unittest.main(verbosity=2, exit=True)

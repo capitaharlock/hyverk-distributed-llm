@@ -13,6 +13,8 @@ Input/output via files to avoid serialization overhead.
 import argparse, json, os, sys, time
 
 DEBUG_NAN = bool(os.environ.get("HYVERK_DEBUG_NAN"))
+COMPILE_LAYERS = bool(os.environ.get("HYVERK_COMPILE"))
+COMPILE_MODE = os.environ.get("HYVERK_COMPILE_MODE", "reduce-overhead")
 
 
 def _sample_next_token(last_logits, temperature, top_p, top_k):
@@ -221,6 +223,30 @@ def load_model_layers(args):
             layer = layer.float()  # int8 quantization requires float32
             layer = torch.quantization.quantize_dynamic(layer, {torch.nn.Linear}, dtype=torch.qint8)
         layers.append(layer)
+
+    # Optional torch.compile — CUDA only. Opt-in via HYVERK_COMPILE=1 because the
+    # first decode step pays the compile cost (seconds) and MPS/CPU inductor
+    # support is not reliable enough to default on. HYVERK_COMPILE_MODE overrides
+    # the inductor mode (default "reduce-overhead" is tuned for small-batch decode).
+    if COMPILE_LAYERS:
+        if device.type == "cuda" and hasattr(torch, "compile"):
+            try:
+                layers = [
+                    torch.compile(l, mode=COMPILE_MODE, fullgraph=False, dynamic=True)
+                    for l in layers
+                ]
+                print(
+                    f"torch.compile enabled on {len(layers)} layers (mode={COMPILE_MODE})",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(f"torch.compile failed, running eager: {e}", file=sys.stderr)
+        else:
+            print(
+                f"HYVERK_COMPILE requested but device={device.type}; skipping "
+                f"(CUDA only — MPS/CPU inductor is flaky)",
+                file=sys.stderr,
+            )
 
     # Embedding (first node)
     embed = None
