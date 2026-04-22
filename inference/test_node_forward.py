@@ -177,6 +177,46 @@ class DecodeHotPathTests(unittest.TestCase):
         torch.testing.assert_close(incr_last, full_last, rtol=5e-3, atol=5e-3)
 
 
+def test_sampler():
+    """Verify _sample_next_token contract (temperature, top_k, top_p, degenerate)."""
+    if not HAS_DEPS: return
+    # Import lazily so the top-of-file skip works
+    spec = importlib.util.spec_from_file_location(
+        "nf_for_sampler", os.path.join(ROOT, "node_forward.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sample = mod._sample_next_token
+
+    torch.manual_seed(0)
+    vocab = 64
+    logits = torch.randn(vocab, dtype=torch.float32)
+    argmax_id = int(torch.argmax(logits).item())
+
+    # 1. temperature=0 → greedy argmax (deterministic)
+    for _ in range(5):
+        assert sample(logits, 0.0, 1.0, 0) == argmax_id
+
+    # 2. top_k=1 at any temperature → argmax (only one bin available)
+    for _ in range(5):
+        assert sample(logits, 1.0, 1.0, 1) == argmax_id
+
+    # 3. top_p=1e-9 → only the argmax survives (first sorted bin)
+    for _ in range(5):
+        assert sample(logits, 1.0, 1e-9, 0) == argmax_id
+
+    # 4. Full distribution (temperature=1, no filter) should produce varied samples
+    torch.manual_seed(42)
+    draws = {sample(logits, 1.0, 1.0, 0) for _ in range(50)}
+    assert len(draws) > 1, f"temperature sampling collapsed: {draws}"
+
+    # 5. Degenerate input — all -inf logits must not hang / raise
+    bad = torch.full((vocab,), float("-inf"))
+    tid = sample(bad, 1.0, 0.9, 10)
+    assert 0 <= tid < vocab
+
+    print(f"sampler tests: OK (argmax={argmax_id}, varied draws={len(draws)})")
+
+
 def test_debug_nan_env_gate():
     """Verify the HYVERK_DEBUG_NAN env var toggle is read at import time."""
     spec = importlib.util.spec_from_file_location(
@@ -259,6 +299,7 @@ def test_health_endpoint_lockfree_during_inference():
 
 
 if __name__ == "__main__":
+    test_sampler()
     test_debug_nan_env_gate()
     test_health_endpoint_lockfree_during_inference()
     unittest.main(verbosity=2, exit=True)

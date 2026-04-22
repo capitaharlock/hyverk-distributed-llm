@@ -14,6 +14,52 @@ import argparse, json, os, sys, time
 
 DEBUG_NAN = bool(os.environ.get("HYVERK_DEBUG_NAN"))
 
+
+def _sample_next_token(last_logits, temperature, top_p, top_k):
+    """Pick the next token id from a 1-D logits vector (shape [vocab_size]).
+
+    temperature <= 0 → deterministic argmax (the legacy behaviour).
+    top_p  in (0, 1) → nucleus filter: keep the smallest set whose cumulative
+                       probability ≥ top_p, mask the rest. top_p>=1 disables.
+    top_k  > 0        → keep only the top-k logits. 0 disables.
+
+    NaN/Inf handling and token-0 blocking happen before this call; we assume
+    last_logits is already sanitised.
+    """
+    import torch  # local import — helper also used outside the serve closure
+    if temperature is None or temperature <= 0.0:
+        return int(torch.argmax(last_logits).item())
+
+    lg = last_logits.float() / max(float(temperature), 1e-6)
+    vocab = lg.numel()
+
+    if top_k and 0 < top_k < vocab:
+        kth = torch.topk(lg, top_k).values[-1]
+        lg = torch.where(lg < kth, torch.full_like(lg, float("-inf")), lg)
+
+    if top_p and 0.0 < top_p < 1.0:
+        sorted_logits, sorted_idx = torch.sort(lg, descending=True)
+        probs = torch.softmax(sorted_logits, dim=-1)
+        cum = torch.cumsum(probs, dim=-1)
+        # keep[i] is True while the cumulative prob BEFORE position i is < top_p.
+        # That keeps the first token always and every token while we're still
+        # under the nucleus boundary.
+        keep = (cum - probs) < top_p
+        keep[0] = True
+        sorted_logits = torch.where(
+            keep, sorted_logits, torch.full_like(sorted_logits, float("-inf"))
+        )
+        # scatter back to original ordering
+        lg = torch.full_like(lg, float("-inf"))
+        lg.scatter_(0, sorted_idx, sorted_logits)
+
+    probs = torch.softmax(lg, dim=-1)
+    # guard against a fully -inf row (shouldn't happen but be safe)
+    if not torch.isfinite(probs).any() or probs.sum() <= 0:
+        return int(torch.argmax(last_logits).item())
+    idx = torch.multinomial(probs, num_samples=1)
+    return int(idx.item())
+
 try:
     import torch
     from transformers import AutoConfig
@@ -497,6 +543,21 @@ def serve_model(args):
                 shape = json.loads(shape_str) if shape_str else [1, length // (config.hidden_size * 2), config.hidden_size]
                 arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
                 is_generate = (mode == "generate")
+
+                # Sampling params — default temperature=0 preserves argmax behaviour.
+                # Coordinator sets these per request; unset = greedy.
+                def _fhdr(name, default):
+                    v = self.headers.get(name)
+                    try: return float(v) if v is not None and v != "" else default
+                    except ValueError: return default
+                def _ihdr(name, default):
+                    v = self.headers.get(name)
+                    try: return int(v) if v is not None and v != "" else default
+                    except ValueError: return default
+                temperature = _fhdr("X-Temperature", 0.0)
+                top_p       = _fhdr("X-Top-P", 1.0)
+                top_k       = _ihdr("X-Top-K", 0)
+
                 with torch.inference_mode():
                     hidden = torch.from_numpy(arr.copy()).to(device)
                     hidden = run_forward(hidden, request_id, is_generate, reset_kv=False)
@@ -517,7 +578,7 @@ def serve_model(args):
                         # always a numerical artifact when argmax returns 0 from degraded states
                         last_logits[0] = -1e5
 
-                        token_id = int(torch.argmax(last_logits).item())
+                        token_id = _sample_next_token(last_logits, temperature, top_p, top_k)
 
                 if is_generate and lm_head_weight_fp32 is not None:
                     elapsed = time.time() - t0
