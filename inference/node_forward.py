@@ -201,8 +201,8 @@ def load_model_layers(args):
 
 def serve_model(args):
     """Persistent HTTP server — loads model once, handles requests via HTTP."""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import struct
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    import struct, threading
 
     print(f"Loading model layers {args.layer_start}-{args.layer_end}...", file=sys.stderr)
     t0 = time.time()
@@ -224,6 +224,11 @@ def serve_model(args):
     # request_id -> {"cache": DynamicCache} (incremental decode; needs recent transformers + Qwen2)
     kv_cache_state = {}
     MAX_CACHE_ENTRIES = 8
+
+    # Serialises all GPU work across concurrent HTTP threads. /health and other
+    # non-model endpoints stay lock-free so they stay responsive during inference.
+    model_lock = threading.Lock()
+    started_at = time.time()
 
     # Warmup pass with use_cache=True to compile kernels
     print("Running warmup pass...", file=sys.stderr)
@@ -364,6 +369,40 @@ def serve_model(args):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *a): pass
 
+        def _json(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path in ("/health", "/healthz", "/"):
+                # Lock-free: reads only snapshot counters. Safe because Python dict
+                # len() and DynamicCache.get_seq_length() are atomic for our usage.
+                entries = []
+                for rid, v in list(kv_cache_state.items()):
+                    cache = v.get("cache")
+                    try:
+                        seen = cache.get_seq_length() if cache is not None else 0
+                    except Exception:
+                        seen = 0
+                    entries.append({"request_id": rid, "kv_tokens": int(seen)})
+                self._json(200, {
+                    "status": "ready",
+                    "device": str(device),
+                    "layers": f"{args.layer_start}-{args.layer_end}",
+                    "port": args.port,
+                    "kv_incremental": DynamicCache is not None,
+                    "active_requests": len(kv_cache_state),
+                    "max_cache_entries": MAX_CACHE_ENTRIES,
+                    "uptime_s": int(time.time() - started_at),
+                    "kv_entries": entries,
+                })
+                return
+            self._json(404, {"error": f"unknown path {self.path}"})
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             content_type = self.headers.get("Content-Type", "")
@@ -372,6 +411,12 @@ def serve_model(args):
             request_id = self.headers.get("X-Request-Id", "")
 
             t0 = time.time()
+            # Serialise GPU work. Parsing the body inside the lock is cheap and lets
+            # us treat the model state (kv_cache_state, cache objects) as exclusive.
+            acquired = model_lock.acquire(timeout=300)
+            if not acquired:
+                self._json(503, {"error": "model busy (lock timeout)"})
+                return
             try:
                 if content_type == "application/json":
                     body = self.rfile.read(length)
@@ -501,8 +546,11 @@ def serve_model(args):
                 self.send_header("Content-Length", str(len(err)))
                 self.end_headers()
                 self.wfile.write(err)
+            finally:
+                model_lock.release()
 
-    server = HTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server.daemon_threads = True
     print(json.dumps({
         "status": "ready",
         "port": args.port,

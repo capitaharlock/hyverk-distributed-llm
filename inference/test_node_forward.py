@@ -192,9 +192,73 @@ def test_debug_nan_env_gate():
     mod2 = importlib.util.module_from_spec(spec2)
     spec2.loader.exec_module(mod2)
     assert mod2.DEBUG_NAN is False, "unset HYVERK_DEBUG_NAN should disable the flag"
+
+
+def test_health_endpoint_lockfree_during_inference():
+    """Stand up a minimal ThreadingHTTPServer that mimics serve_model's health wiring
+    and verify /health responds even while a POST holds the model_lock.
+    No model weights loaded — this only exercises the HTTP layer."""
+    import threading, urllib.request, json as _json
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    import time as _time
+
+    model_lock = threading.Lock()
+    started_at = _time.time()
+    kv_cache_state = {"req-a": {"cache": None}, "req-b": {"cache": None}}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a, **k): pass
+        def do_GET(self):
+            if self.path in ("/health", "/"):
+                body = _json.dumps({
+                    "status": "ready",
+                    "active_requests": len(kv_cache_state),
+                    "uptime_s": int(_time.time() - started_at),
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404); self.end_headers()
+        def do_POST(self):
+            # Simulate a long inference: hold the lock for 1s
+            if not model_lock.acquire(timeout=5):
+                self.send_response(503); self.end_headers(); return
+            try:
+                _time.sleep(1.0)
+                self.send_response(200); self.send_header("Content-Length","2"); self.end_headers()
+                self.wfile.write(b'ok')
+            finally:
+                model_lock.release()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True); t.start()
+    try:
+        # Start a long POST in the background (grabs the lock)
+        def long_post():
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/", data=b"x", timeout=10).read()
+        p = threading.Thread(target=long_post, daemon=True); p.start()
+        _time.sleep(0.2)  # let it acquire the lock
+        # /health must answer while inference thread holds the lock
+        t0 = _time.time()
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2).read()
+        elapsed = _time.time() - t0
+        data = _json.loads(resp)
+        assert data["status"] == "ready", data
+        assert data["active_requests"] == 2, data
+        assert elapsed < 0.5, f"/health should be lock-free, took {elapsed:.2f}s"
+        p.join(timeout=3)
+        print(f"/health responded in {elapsed*1000:.0f}ms while POST held lock: OK")
+    finally:
+        srv.shutdown()
     print("DEBUG_NAN env gate: OK")
 
 
 if __name__ == "__main__":
     test_debug_nan_env_gate()
+    test_health_endpoint_lockfree_during_inference()
     unittest.main(verbosity=2, exit=True)
