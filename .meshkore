@@ -1,11 +1,14 @@
 {
   "room": {
     "channel_id": "64a2cfe0-7b86-4335-93cc-f3d6fcf672cb",
+    "name": "hyverk-cluster",
+    "roles": ["architect", "implementer", "reviewer"],
     "requires_invite": true,
     "signed_invite": false,
     "require_approval": false
   },
   "join": {
-    "hub": "https://hub.meshkore.com"
+    "hub": "https://hub.meshkore.com",
+    "docs": "https://hub.meshkore.com/platform/docs/agent"
   }
 }
