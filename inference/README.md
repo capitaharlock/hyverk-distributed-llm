@@ -107,6 +107,15 @@ X-Top-P:       0.9              ; optional, nucleus filter
 X-Top-K:       50               ; optional, top-k filter
 ```
 
+As of DINF-011 (commit `ea42d3f`), the Rust coordinator + ws_worker
+actually populate these headers from the original request parameters
+(`CoordinatorMessage::InferenceStart/Forward/Continue` carry
+`temperature` / `top_p` / `top_k`; the node keeps them in a per-`request_id`
+map and attaches them when `mode == generate`). So the end-to-end
+sampling pipeline is: coordinator → ws_worker → Python headers →
+`_sample_next_token`. Operators can still use the HYVERK_* env defaults
+as a global floor, but per-request overrides now win all the way through.
+
 Body: raw fp16 bytes for the hidden-state tensor in shape `X-Shape`.
 
 Response for `X-Mode: forward`:
