@@ -1,19 +1,22 @@
 {
-  "room": {
-    "channel_id": "64a2cfe0-7b86-4335-93cc-f3d6fcf672cb",
+  "meshkore_version": 1,
+  "hub": {
+    "url": "https://hub.meshkore.com",
+    "docs": "https://hub.meshkore.com/platform/docs/agent"
+  },
+  "cluster": {
     "name": "hyverk-cluster",
+    "channel_id": "f12223e4-0690-46fd-b9eb-a074c5cc795f",
     "visibility": "public",
+    "admission": "invite",
+    "invite": "https://hub.meshkore.com/agents/invites/ab86077e1ede595f378c58a6bfaefa46/join",
+    "invite_expires_at": null,
+    "viewer": "https://meshkore.com/cluster/f12223e4-0690-46fd-b9eb-a074c5cc795f",
+    "purpose": "Collaborative development on hyverk.com — distributed GPU inference and product surface.",
     "roles": ["architect", "implementer", "reviewer"],
-    "requires_invite": true,
-    "signed_invite": false,
-    "require_approval": false
+    "owners": ["hyverk-lead"]
   },
-  "join": {
-    "hub": "https://hub.meshkore.com",
-    "docs": "https://hub.meshkore.com/platform/docs/agent",
-    "invite": "https://hub.meshkore.com/agents/invites/5fc2181600b6bdfcb0de7e633358a8e7/join"
-  },
-  "_convention": {
-    "join.invite": "Present only when room.visibility == 'public'. For private rooms set to 'request-from-founder-out-of-band' or omit entirely — the invite URL then travels via Signal/email/voice."
+  "messaging": {
+    "protocol": "plan-task-review@v1"
   }
 }
