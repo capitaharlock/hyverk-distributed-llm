@@ -12,6 +12,8 @@ Input/output via files to avoid serialization overhead.
 """
 import argparse, json, os, sys, time
 
+DEBUG_NAN = bool(os.environ.get("HYVERK_DEBUG_NAN"))
+
 try:
     import torch
     from transformers import AutoConfig
@@ -188,12 +190,14 @@ def load_model_layers(args):
         norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         norm.weight = torch.nn.Parameter(weights["model.norm.weight"], requires_grad=False)
         norm = norm.to(device)
+    lm_head_weight_fp32 = None
     if "lm_head.weight" in weights:
         lm_head = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         lm_head.weight = torch.nn.Parameter(weights["lm_head.weight"], requires_grad=False)
         lm_head = lm_head.to(device)
+        lm_head_weight_fp32 = lm_head.weight.data.to(dtype=torch.float32)
 
-    return config, device, rotary, layers, embed, norm, lm_head
+    return config, device, rotary, layers, embed, norm, lm_head, lm_head_weight_fp32
 
 def serve_model(args):
     """Persistent HTTP server — loads model once, handles requests via HTTP."""
@@ -202,7 +206,7 @@ def serve_model(args):
 
     print(f"Loading model layers {args.layer_start}-{args.layer_end}...", file=sys.stderr)
     t0 = time.time()
-    config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
+    config, device, rotary, layers, embed, norm, lm_head, lm_head_weight_fp32 = load_model_layers(args)
     print(f"Model loaded in {time.time()-t0:.1f}s on {device}", file=sys.stderr)
 
     try:
@@ -264,7 +268,7 @@ def serve_model(args):
                         position_embeddings=pos_emb,
                     )
                 hidden = out[0] if isinstance(out, tuple) else out
-                if torch.isnan(hidden).any() or torch.isinf(hidden).any():
+                if DEBUG_NAN and (torch.isnan(hidden).any() or torch.isinf(hidden).any()):
                     print("WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
             if is_generate and norm:
                 hidden = norm(hidden)
@@ -292,8 +296,14 @@ def serve_model(args):
         ).unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
 
+        # Pure decode (seq=1 appended to existing cache): no mask needed. A single new
+        # query attends to cached keys + itself; there is no future position to hide.
+        # Skipping create_causal_mask here saves the per-step tensor allocation that
+        # dominated the decode-step cost on prefill-heavy runs.
+        is_decode_step = (seq_len == 1 and past_seen > 0)
+
         causal_mask_mapping = None
-        if create_causal_mask is not None:
+        if create_causal_mask is not None and not is_decode_step:
             mask_kwargs = dict(
                 config=config,
                 inputs_embeds=hidden,
@@ -340,7 +350,7 @@ def serve_model(args):
                         position_embeddings=pos_emb,
                     )
                 hidden = out[0] if isinstance(out, tuple) else out
-                if torch.isnan(hidden).any() or torch.isinf(hidden).any():
+                if DEBUG_NAN and (torch.isnan(hidden).any() or torch.isinf(hidden).any()):
                     print("WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
             if is_generate and norm:
                 hidden = norm(hidden)
@@ -445,8 +455,11 @@ def serve_model(args):
                 with torch.inference_mode():
                     hidden = torch.from_numpy(arr.copy()).to(device)
                     hidden = run_forward(hidden, request_id, is_generate, reset_kv=False)
-                    if is_generate and lm_head:
-                        logits = lm_head.float()(hidden.float())
+                    if is_generate and lm_head_weight_fp32 is not None:
+                        # Use the cached fp32 weight matrix; the old path called
+                        # lm_head.float() every step, which copied the full vocab×hidden
+                        # projection (~2 GB on Qwen2.5-7B) to fp32 on every token.
+                        logits = torch.nn.functional.linear(hidden.float(), lm_head_weight_fp32)
                         last_logits = logits[0, -1]  # [vocab_size]
 
                         # Clean NaN/Inf from logits (caused by fp16 overflow in attention)
@@ -461,7 +474,7 @@ def serve_model(args):
 
                         token_id = int(torch.argmax(last_logits).item())
 
-                if is_generate and lm_head:
+                if is_generate and lm_head_weight_fp32 is not None:
                     elapsed = time.time() - t0
                     resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
                     self.send_response(200)
@@ -503,7 +516,7 @@ def serve_model(args):
 
 def embed_tokens(args):
     """First node: embed token IDs, forward through layers, save hidden states"""
-    config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
+    config, device, rotary, layers, embed, norm, lm_head, _ = load_model_layers(args)
 
     token_ids = [int(x) for x in args.token_ids.split(",") if x]
     ids = torch.tensor([token_ids], device=device, dtype=torch.long)
@@ -523,7 +536,7 @@ def embed_tokens(args):
 
 def forward_layers(args):
     """Middle node: load hidden states, forward through layers, save result"""
-    config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
+    config, device, rotary, layers, embed, norm, lm_head, _ = load_model_layers(args)
 
     hidden = torch.load(args.input_file, map_location=device, weights_only=True)
     seq_len = hidden.shape[1]
@@ -540,7 +553,7 @@ def forward_layers(args):
 
 def generate_token(args):
     """Last node: forward through layers + norm + lm_head → token ID"""
-    config, device, rotary, layers, embed, norm, lm_head = load_model_layers(args)
+    config, device, rotary, layers, embed, norm, lm_head, lm_head_weight_fp32 = load_model_layers(args)
 
     hidden = torch.load(args.input_file, map_location=device, weights_only=True)
     seq_len = hidden.shape[1]
@@ -552,8 +565,8 @@ def generate_token(args):
             out = layer(hidden, position_embeddings=position_embeddings, use_cache=False)
             hidden = out[0] if isinstance(out, tuple) else out
         if norm: hidden = norm(hidden)
-        if lm_head:
-            logits = lm_head.float()(hidden.float())
+        if lm_head_weight_fp32 is not None:
+            logits = torch.nn.functional.linear(hidden.float(), lm_head_weight_fp32)
             token_id = torch.argmax(logits[0, -1]).item()
         else:
             token_id = 0
