@@ -20,7 +20,12 @@ pub enum CoordinatorMessage {
         layer_start: usize,
         layer_end: usize,
         max_tokens: usize,
-        temperature: f32,
+        #[serde(default)]
+        temperature: Option<f32>,
+        #[serde(default)]
+        top_p: Option<f32>,
+        #[serde(default)]
+        top_k: Option<u32>,
     },
     /// Continue inference chain (middle/last: receive hidden states, forward)
     InferenceForward {
@@ -30,6 +35,12 @@ pub enum CoordinatorMessage {
         layer_start: usize,
         layer_end: usize,
         is_last: bool,
+        #[serde(default)]
+        temperature: Option<f32>,
+        #[serde(default)]
+        top_p: Option<f32>,
+        #[serde(default)]
+        top_k: Option<u32>,
     },
     /// Decode one new token on the first node after prefill (embed single `new_token_id` with KV cache).
     InferenceContinue {
@@ -39,6 +50,10 @@ pub enum CoordinatorMessage {
         layer_end: usize,
         max_tokens: usize,
         temperature: f32,
+        #[serde(default)]
+        top_p: Option<f32>,
+        #[serde(default)]
+        top_k: Option<u32>,
     },
     /// Drop KV / state for `request_id` on this node (broadcast when a request finishes or aborts).
     InferenceEnd {

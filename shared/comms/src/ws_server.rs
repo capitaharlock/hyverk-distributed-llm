@@ -73,7 +73,9 @@ impl WsServer {
             layer_start: *l_start,
             layer_end: *l_end,
             max_tokens,
-            temperature,
+            temperature: Some(temperature),
+            top_p: None,
+            top_k: None,
         }).await;
 
         // The chain continues when each node sends ForwardResult back,

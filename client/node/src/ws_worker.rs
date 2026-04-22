@@ -5,7 +5,8 @@
 
 use futures_util::{SinkExt, StreamExt};
 use hyverk_comms::messages::{ClientMessage, CoordinatorMessage};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -13,6 +14,62 @@ use tracing::{error, info, warn};
 /// Single shared client for `127.0.0.1` layer inference (one request per generated token).
 /// Creating a new `reqwest::Client` each call drops the connection pool and forces new TCP
 /// handshakes to localhost — measurable latency on autoregressive decoding.
+/// Per-request sampling forwarded to the local Python `generate` path (X-* headers).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SamplingParams {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+}
+
+pub fn merge_optional_sampling(
+    into: &mut SamplingParams,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    top_k: Option<u32>,
+) {
+    if temperature.is_some() {
+        into.temperature = temperature;
+    }
+    if top_p.is_some() {
+        into.top_p = top_p;
+    }
+    if top_k.is_some() {
+        into.top_k = top_k;
+    }
+}
+
+pub fn merge_from_continue(
+    into: &mut SamplingParams,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<u32>,
+) {
+    into.temperature = Some(temperature);
+    if top_p.is_some() {
+        into.top_p = top_p;
+    }
+    if top_k.is_some() {
+        into.top_k = top_k;
+    }
+}
+
+pub fn apply_sampling_headers(
+    mut req: reqwest::RequestBuilder,
+    params: &SamplingParams,
+) -> reqwest::RequestBuilder {
+    if let Some(t) = params.temperature {
+        req = req.header("X-Temperature", format!("{t}"));
+    }
+    if let Some(p) = params.top_p {
+        req = req.header("X-Top-P", format!("{p}"));
+    }
+    if let Some(k) = params.top_k {
+        req = req.header("X-Top-K", k.to_string());
+    }
+    req
+}
+
 fn local_inference_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -62,13 +119,16 @@ pub async fn run_ws_worker(
         info!("CPU node — training/synthesis only, no inference layers needed");
     }
 
+    let sampling_by_request: Arc<Mutex<HashMap<String, SamplingParams>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
                 info!("WS worker shutting down");
                 break;
             }
-            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &model_dir, &coordinator_http, &assigned_layers, &layers_ready, &download_failed, &shutdown) => {
+            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &model_dir, &coordinator_http, &assigned_layers, &layers_ready, &download_failed, &shutdown, &sampling_by_request) => {
                 match result {
                     Ok(()) => info!("WS connection closed cleanly"),
                     Err(e) => warn!("WS connection error: {e}"),
@@ -93,6 +153,7 @@ async fn connect_and_run(
     layers_ready: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     download_failed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     shutdown: &tokio_util::sync::CancellationToken,
+    sampling_by_request: &Arc<Mutex<HashMap<String, SamplingParams>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(url = ws_url, "Connecting WebSocket...");
 
@@ -198,7 +259,11 @@ async fn connect_and_run(
                                     format!("{model_dir}/inference_layers_{ls}_{le}")
                                 } else { model_dir.to_string() };
 
-                                if let Some(response) = handle_coordinator_message(coord_msg, &current_model_dir).await {
+                                if let Some(response) = handle_coordinator_message(
+                                    coord_msg,
+                                    &current_model_dir,
+                                    sampling_by_request,
+                                ).await {
                                     match response {
                                         WsResponse::Text(msg) => {
                                             sink.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
@@ -221,7 +286,11 @@ async fn connect_and_run(
                         let bin_model_dir = if let Some((ls, le)) = *assigned_layers.read().await {
                             format!("{model_dir}/inference_layers_{ls}_{le}")
                         } else { model_dir.to_string() };
-                        if let Some(response) = handle_binary_forward(data.to_vec(), &bin_model_dir).await {
+                        if let Some(response) = handle_binary_forward(
+                            data.to_vec(),
+                            &bin_model_dir,
+                            sampling_by_request,
+                        ).await {
                             match response {
                                 WsResponse::Text(msg) => {
                                     sink.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
@@ -259,6 +328,7 @@ enum WsResponse {
 async fn handle_coordinator_message(
     msg: CoordinatorMessage,
     model_dir: &str,
+    sampling_by_request: &Arc<Mutex<HashMap<String, SamplingParams>>>,
 ) -> Option<WsResponse> {
     match msg {
         CoordinatorMessage::InferenceStart {
@@ -266,9 +336,16 @@ async fn handle_coordinator_message(
             token_ids,
             layer_start,
             layer_end,
-            max_tokens,
+            max_tokens: _,
             temperature,
+            top_p,
+            top_k,
         } => {
+            if let Ok(mut g) = sampling_by_request.lock() {
+                let mut p = SamplingParams::default();
+                merge_optional_sampling(&mut p, temperature, top_p, top_k);
+                g.insert(request_id.clone(), p);
+            }
             info!(request_id = %request_id, layers = format!("{layer_start}-{layer_end}"), tokens = token_ids.len(), "Inference start: embed + forward");
 
             let result =
@@ -299,8 +376,17 @@ async fn handle_coordinator_message(
             layer_start,
             layer_end,
             is_last,
+            temperature,
+            top_p,
+            top_k,
             ..
         } => {
+            if is_last {
+                if let Ok(mut g) = sampling_by_request.lock() {
+                    let e = g.entry(request_id.clone()).or_default();
+                    merge_optional_sampling(e, temperature, top_p, top_k);
+                }
+            }
             info!(request_id = %request_id, layers = format!("{layer_start}-{layer_end}"), last = is_last, "Inference forward received");
             // Hidden states arrive as binary frame — handled in handle_binary_forward
             None
@@ -310,8 +396,15 @@ async fn handle_coordinator_message(
             new_token_id,
             layer_start,
             layer_end,
+            temperature,
+            top_p,
+            top_k,
             ..
         } => {
+            if let Ok(mut g) = sampling_by_request.lock() {
+                let e = g.entry(request_id.clone()).or_default();
+                merge_from_continue(e, temperature, top_p, top_k);
+            }
             info!(
                 request_id = %request_id,
                 new_token_id,
@@ -338,6 +431,9 @@ async fn handle_coordinator_message(
             }
         }
         CoordinatorMessage::InferenceEnd { request_id } => {
+            if let Ok(mut g) = sampling_by_request.lock() {
+                g.remove(&request_id);
+            }
             clear_local_kv_cache(&request_id).await;
             None
         }
@@ -346,7 +442,11 @@ async fn handle_coordinator_message(
     }
 }
 
-async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsResponse> {
+async fn handle_binary_forward(
+    data: Vec<u8>,
+    model_dir: &str,
+    sampling_by_request: &Arc<Mutex<HashMap<String, SamplingParams>>>,
+) -> Option<WsResponse> {
     if data.len() < 36 {
         return None;
     }
@@ -372,13 +472,26 @@ async fn handle_binary_forward(data: Vec<u8>, model_dir: &str) -> Option<WsRespo
     let hidden_size = 3584usize; // Qwen2.5-7B hidden size
     let seq_len = hidden_data.len() / (hidden_size * 2); // f16 = 2 bytes
 
-    let resp = match client.post(&url)
+    let sampling = sampling_by_request
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&request_id).cloned())
+        .unwrap_or_default();
+
+    let post = client
+        .post(&url)
         .header("X-Mode", mode)
         .header("X-Shape", format!("[1,{seq_len},{hidden_size}]"))
         .header("X-Request-Id", &request_id)
-        .header("Content-Type", "application/octet-stream")
-        .body(hidden_data)
-        .send().await {
+        .header("Content-Type", "application/octet-stream");
+
+    let post = if mode == "generate" {
+        apply_sampling_headers(post, &sampling)
+    } else {
+        post
+    };
+
+    let resp = match post.body(hidden_data).send().await {
         Ok(r) => r,
         Err(e) => {
             error!("Inference server unreachable: {e}");
@@ -734,4 +847,68 @@ fn find_script(name: &str) -> String {
         }
     }
     name.to_string()
+}
+
+#[cfg(test)]
+mod sampling_cache_tests {
+    use super::*;
+
+    #[test]
+    fn insert_lookup_cleanup_lifecycle() {
+        let m = Arc::new(Mutex::new(HashMap::new()));
+        let rid = "req-a".to_string();
+
+        {
+            let mut g = m.lock().unwrap();
+            let mut p = SamplingParams::default();
+            merge_optional_sampling(&mut p, Some(0.8), Some(0.95), Some(40));
+            g.insert(rid.clone(), p);
+        }
+        assert_eq!(
+            m.lock().unwrap().get(&rid).cloned(),
+            Some(SamplingParams {
+                temperature: Some(0.8),
+                top_p: Some(0.95),
+                top_k: Some(40),
+            })
+        );
+
+        {
+            let mut g = m.lock().unwrap();
+            let e = g.entry(rid.clone()).or_default();
+            merge_from_continue(e, 0.2, None, Some(50));
+        }
+        assert_eq!(
+            m.lock().unwrap().get(&rid).cloned(),
+            Some(SamplingParams {
+                temperature: Some(0.2),
+                top_p: Some(0.95),
+                top_k: Some(50),
+            })
+        );
+
+        {
+            let mut g = m.lock().unwrap();
+            g.remove(&rid);
+        }
+        assert!(m.lock().unwrap().get(&rid).is_none());
+    }
+
+    #[test]
+    fn merge_optional_preserves_unset() {
+        let mut p = SamplingParams {
+            temperature: Some(1.0),
+            top_p: Some(0.9),
+            top_k: None,
+        };
+        merge_optional_sampling(&mut p, None, Some(0.5), None);
+        assert_eq!(
+            p,
+            SamplingParams {
+                temperature: Some(1.0),
+                top_p: Some(0.5),
+                top_k: None,
+            }
+        );
+    }
 }

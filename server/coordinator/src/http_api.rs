@@ -1209,6 +1209,8 @@ async fn ws_inference(
     let prompt = req["prompt"].as_str().unwrap_or("").to_string();
     let max_tokens = req["max_tokens"].as_u64().unwrap_or(64) as usize;
     let temperature = req["temperature"].as_f64().unwrap_or(0.7) as f32;
+    let top_p = req.get("top_p").and_then(|v| v.as_f64()).map(|x| x as f32);
+    let top_k = req.get("top_k").and_then(|v| v.as_u64()).map(|x| x as u32);
 
     if prompt.is_empty() {
         return Json(serde_json::json!({"error": "prompt required"})).into_response();
@@ -1246,6 +1248,8 @@ async fn ws_inference(
             generated: vec![],
             max_tokens,
             temperature,
+            top_p,
+            top_k,
             result_tx: Some(result_tx),
         });
     }
@@ -1258,7 +1262,9 @@ async fn ws_inference(
         layer_start: first.layer_start,
         layer_end: first.layer_end,
         max_tokens,
-        temperature,
+        temperature: Some(temperature),
+        top_p,
+        top_k,
     }).await;
 
     if !sent {

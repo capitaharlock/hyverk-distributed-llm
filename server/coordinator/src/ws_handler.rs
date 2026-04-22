@@ -40,6 +40,8 @@ pub struct PendingForward {
     pub generated: Vec<u32>,
     pub max_tokens: usize,
     pub temperature: f32,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
     pub result_tx: Option<tokio::sync::oneshot::Sender<InferenceResult>>,
 }
 
@@ -388,12 +390,24 @@ async fn route_forward_result(
         if pending.current_step < pending.chain.len() {
             // Send to next node in chain
             let next = &pending.chain[pending.current_step];
+            let (temperature, top_p, top_k) = if next.is_last {
+                (
+                    Some(pending.temperature),
+                    pending.top_p,
+                    pending.top_k,
+                )
+            } else {
+                (None, None, None)
+            };
             let msg = CoordinatorMessage::InferenceForward {
                 request_id: request_id.to_string(),
                 hidden_states_ref: String::new(), // binary sent separately
                 layer_start: next.layer_start,
                 layer_end: next.layer_end,
                 is_last: next.is_last,
+                temperature,
+                top_p,
+                top_k,
             };
             state.send_to_node(&next.node_id, msg).await;
             // Send binary hidden states (36-byte request id prefix, padded — matches node client)
@@ -477,6 +491,8 @@ async fn handle_generated_token(
                 layer_end: first.layer_end,
                 max_tokens: pending.max_tokens,
                 temperature: pending.temperature,
+                top_p: pending.top_p,
+                top_k: pending.top_k,
             };
             state.send_to_node(&first.node_id, msg).await;
         }
