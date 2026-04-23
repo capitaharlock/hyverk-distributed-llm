@@ -197,12 +197,12 @@ def run_distributed(args):
 
     # Warmup Node1
     with torch.no_grad():
-        _ = model1(ids, use_cache=False)
+        _ = model1.model(ids, use_cache=False)
 
     # Prefill
     t0 = time.perf_counter()
     with torch.no_grad():
-        out1 = model1(ids, use_cache=True)
+        out1 = model1.model(ids, use_cache=True)
     hidden = out1.last_hidden_state
     past1  = out1.past_key_values
     t_node1 = (time.perf_counter() - t0) * 1000
@@ -223,8 +223,8 @@ def run_distributed(args):
     for i in range(args.max_tokens - 1):
         ts = time.perf_counter()
         with torch.no_grad():
-            out1 = model1(torch.tensor([[next_tok]], device=device),
-                          past_key_values=past1, use_cache=True)
+            out1 = model1.model(torch.tensor([[next_tok]], device=device),
+                                past_key_values=past1, use_cache=True)
         past1  = out1.past_key_values
         hidden = out1.last_hidden_state
         t1 = (time.perf_counter() - ts) * 1000
