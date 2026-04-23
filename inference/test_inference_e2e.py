@@ -64,7 +64,7 @@ def build_node1_model(model_dir: str, split: int, device: torch.device) -> Qwen2
 
 # ── HTTP helpers (talk to Mac Node2 server) ───────────────────────────────────
 
-def post_hidden(url: str, hidden: torch.Tensor, mode: str, req_id: str) -> dict | torch.Tensor:
+def post_hidden(url: str, hidden: torch.Tensor, mode: str, req_id: str):
     import numpy as np
     shape = list(hidden.shape)
     data = hidden.to(torch.float16).cpu().numpy().tobytes()
