@@ -41,6 +41,20 @@ def load_weights(model_dir: str) -> dict:
     return weights
 
 
+def load_weights_partial(model_dir: str, key_prefixes: list) -> dict:
+    """Load only shards that contain keys matching any of the given prefixes."""
+    idx_path = os.path.join(model_dir, "model.safetensors.index.json")
+    with open(idx_path) as f:
+        weight_map = json.load(f)["weight_map"]
+    needed_shards = {shard for key, shard in weight_map.items()
+                     if any(key.startswith(p) or p in key for p in key_prefixes)}
+    weights = {}
+    for shard in sorted(needed_shards):
+        print(f"  loading {shard}...", file=sys.stderr)
+        weights.update(load_file(os.path.join(model_dir, shard), device="cpu"))
+    return weights
+
+
 def build_node1_model(model_dir: str, split: int, device: torch.device) -> Qwen2ForCausalLM:
     """Load embed_tokens + layers 0..split-1 (Node 1)."""
     cfg = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
@@ -52,8 +66,9 @@ def build_node1_model(model_dir: str, split: int, device: torch.device) -> Qwen2
     cfg._attn_implementation = "sdpa"
 
     model = Qwen2ForCausalLM(cfg)
-    weights = load_weights(model_dir)
-    # Keep only embed_tokens + layers 0..split-1 + lm_head (lm_head not used but harmless)
+    # Only load shards containing embed_tokens and layers 0..split-1
+    prefixes = ["embed_tokens"] + [f"model.layers.{i}." for i in range(split)]
+    weights = load_weights_partial(model_dir, prefixes)
     node1_keys = {k: v for k, v in weights.items()
                   if "embed_tokens" in k
                   or any(f"model.layers.{i}." in k for i in range(split))}
@@ -74,7 +89,7 @@ def post_hidden(url: str, hidden: torch.Tensor, mode: str, req_id: str):
     req.add_header("X-Request-Id", req_id)
     req.add_header("X-Shape", json.dumps(shape))
     req.add_header("X-Temperature", "0.0")
-    r = urllib.request.urlopen(req, timeout=120)
+    r = urllib.request.urlopen(req, timeout=600)
     if mode == "generate":
         return json.loads(r.read())
     shape_out = json.loads(r.headers["X-Shape"])
