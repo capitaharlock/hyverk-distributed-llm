@@ -130,6 +130,7 @@ def main():
     p.add_argument("--output-file", default="", help="Output hidden states")
     p.add_argument("--token-ids", default="", help="Comma-separated token IDs for embed mode")
     p.add_argument("--port", type=int, default=18100, help="Port for serve mode")
+    p.add_argument("--host", default="127.0.0.1", help="Bind address for serve mode (use 0.0.0.0 for LAN access)")
     args = p.parse_args()
 
     if args.mode == "download":
@@ -774,7 +775,7 @@ def serve_model(args):
             finally:
                 model_lock.release()
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
     print(json.dumps({
         "status": "ready",
