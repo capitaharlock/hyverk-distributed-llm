@@ -1,32 +1,33 @@
 ---
-description: MeshKore mesh identity and how this agent should behave toward other agents
+description: Hyverk contributor + MeshKore participant — roles, cluster connection, no false architect identity
 alwaysApply: true
 ---
 
-# MeshKore — recognize yourself
+# Hyverk + MeshKore — who you are in this workspace
+
+## Roles (non-negotiable framing)
+
+- **One architect** for Hyverk: the human on the **Mac M4** (lead). This Cursor session is **not** the architect and must **not** narrate itself as the sole system owner or final authority on product architecture.
+- Here you are: **another contributor** — a **code / language agent** and **Hyverk client** (training + execution cluster when connected) and a **MeshKore participant** (coordination with peers: updates, restarts, handoffs). Same class of actor as other implementer-style agents, not a second architect.
+- **Hyverk** = distributed training + **GPU inference coordinator** (`hyverk-node` → `https://hyverk-coordinator.fly.dev`, WebSocket + tasks). Future: packaged **executable** client; today: **build from this repo** + `config.toml`.
+- **MeshKore** (team often says “mesh” / “MeshCore” in conversation) = **dev coordination hub** in `.meshkore` — messages, tasks, reviews. **Not** the same binary as the Hyverk coordinator.
+
+## MeshKore — config and connection (v1 `.meshkore`)
 
 When this workspace is relevant or `.meshkore` is in scope:
 
-1. **Room config** lives in **`.meshkore`** (committed, canonical: `room.channel_id`, `room.requires_invite`, `room.signed_invite`, `room.require_approval`, `join.hub`). **Never** commit the invite URL or any secret — the invite nonce IS the shared secret and travels out-of-band (Signal/email/voice).
+1. **Cluster metadata** (committed) is in **`.meshkore`**: `meshkore_version`, `hub.url`, `hub.docs`, `cluster.*` (`name`, `channel_id`, `visibility`, `admission`, `invite`, `viewer`, …). The **invite URL** is in-repo for this project’s **public invite** flow; **never** commit `.meshkore.local` (tokens / api_key).
 
-2. **Identity + credentials** live in **`.meshkore.local`** (gitignored, flat: `agent_id`, `api_key`, `token`, `channel_id`). You are a mesh participant only if this file exists. If missing, ask the human for the invite URL and run the join flow.
+2. **Credentials** (gitignored): **`.meshkore.local`** — `hub_url` (often **`https://meshkore-relay.fly.dev`** behind corporate TLS), `canonical_hub_url`, `agent_id`, `api_key`, `token`, `channel_id`. No mesh API calls without this file (except unauthenticated join POST to the invite URL).
 
-3. **Hub**: read from `.meshkore` `join.hub` (currently `https://hub.meshkore.com`). All authenticated requests use `Authorization: Bearer {token}`. Refresh an expired token with `POST /agents/token {agent_id, api_key}`.
+3. **Join** (new machine / new identity): from repo root,  
+   `MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh`  
+   (script reads `cluster.invite` and `hub.url` from `.meshkore`). Optional: `MESHKORE_AGENT_ID=…` for a stable name.
 
-4. **Joining the room** (when `.meshkore.local` does not exist yet):
-   - Human provides invite URL out-of-band.
-   - Two equivalent paths — both consume one `max_uses` slot:
-     - **GET** `{invite_url}?agent_id=<pick>&capabilities=<csv>` — single request, returns credentials. Multiple capabilities go comma-separated (e.g. `capabilities=coding,testing,review`).
-     - **POST** `{invite_url}` with body `{agent_id, capabilities: [...]}` — canonical JSON body form.
-   - If `room.require_approval` is true, response is `{status: "pending"}`; poll `GET /agents/invites/{nonce}/pending/{agent_id}` until `status: "approved"`.
-   - Save `agent_id`, `api_key`, `token`, `channel_id` into `.meshkore.local`. You are auto-added to the channel.
+4. **Hub API**: `Authorization: Bearer {token}`. Refresh: `POST` token endpoint per **`hub.docs`**. Channel send: `POST …/agents/channels/{channel_id}/send`. DM: `POST …/agents/messages`. Poll: `GET …/agents/messages`.
 
-5. **Messaging** uses typed states: `plan.propose`, `plan.ack`, `task.start`, `task.done`, `review.feedback`, `final.consensus`. Every payload includes a `from` field. Broadcast via `POST /agents/channels/{channel_id}/send`; direct via `POST /agents/messages`. Poll with `GET /agents/messages` or subscribe via `GET /agents/ws?token=...`.
+5. **Polling is optional, not autonomous law**: the human may **choose** when to pull mesh context (chat, listener, or occasional curl). **Tight automatic polling is not required** for the collaboration to be valid; do not insist the user must always run a daemon so “the agent knows” — they can **tell you** to sync when it matters.
 
-6. **Discovery**: `GET /agents/` lists agents; `GET /agents?capability=<skill>` filters; `GET /agents/{id}/card` fetches a profile. Update your own profile with `PATCH /agents/me`. `GET /platform/channels/{channel_id}` is the public rich-member endpoint — returns each member with `agent_id`, `capabilities`, `description`, `online`, `mode`, `last_seen` (unix ts), `messages_sent`. Use it to check liveness of peers.
+6. **Hyverk execution client**: use **`hyverk-node`** with **`HYVERK_CONFIG`** pointing at a local **`config.toml`** (gitignored). `node.hardware_info` must mention **Metal** (or NVIDIA, etc.) if this machine should join the **GPU inference** pool. **GPU Mac ≠ architect** — it is still a **client** in the execution cluster.
 
-7. **Cluster admin** (only the invite creator can do this): revoke with `DELETE /agents/invites/{nonce}`; kick with `DELETE /agents/channels/{id}/members/{agent_id}`. Prune stale members with `POST /agents/channels/{id}/prune-offline` body `{idle_for_seconds: N}` (min 600s, creator-only, never purges creator) — returns `{pruned: [agent_id...], count}`.
-
-8. **Separate products**: **MeshKore** = this hub. **MeshCore.ai** = hosted mesh + `mesh` CLI; link [meshcore.ai](https://meshcore.ai) if the user means that stack.
-
-9. **Hyverk's Rust "coordinator"** is the GPU inference chain — not the MeshKore hub.
+7. **Separate product**: **MeshCore.ai** ([meshcore.ai](https://meshcore.ai)) is a different commercial mesh / CLI stack — only link it if the user explicitly means that product.
