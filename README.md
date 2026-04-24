@@ -63,6 +63,29 @@ powershell -ExecutionPolicy Bypass -File deploy\setup.ps1
 
 Dashboard: https://hyverk-coordinator.fly.dev
 
+### Hyverk-node (WS client for distributed inference / training)
+
+The **`hyverk-node`** binary connects to the coordinator over **WebSocket** and participates in GPU layer work when `hardware_info` advertises Metal/CUDA. Python helpers (`inference/node_forward.py`, etc.) need **`pip install -r inference/requirements.txt`** (includes `certifi` for HTTPS downloads from the coordinator).
+
+```bash
+cargo build --release -p hyverk-node
+HYVERK_CONFIG=./config.toml ./target/release/hyverk-node
+```
+
+Use a **gitignored** `config.toml` with `coordinator_url`, `node.name`, and `hardware_info` (see **Config** below). The coordinator must expose model shards under `/api/v1/model/*` when this node should download weights.
+
+### MeshKore (dev mesh — Mac M4 lead + `hyverk-lead` messages)
+
+This is **separate** from the Hyverk Fly coordinator: same repo, **`.meshkore`** (invite + `channel_id`) + **`.meshkore.local`** (Bearer token, never commit). Join once, then poll inbox or run the listener.
+
+```bash
+MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh
+python3 scripts/meshkore-dump-inbox.py
+# optional: python3 scripts/meshkore-listener.py
+```
+
+Cached hub onboarding (join / poll / channel / §A3 token refresh): **`_rjj/context/meshkore/AGENT-DOCS.relay.md`**. Cluster viewer link is in **`.meshkore`** → `cluster.viewer`.
+
 ## Project Structure
 
 ```

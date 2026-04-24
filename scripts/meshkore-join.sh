@@ -2,6 +2,9 @@
 # Join MeshKore via cluster invite and write .meshkore.local (gitignored).
 # Reads .meshkore (meshkore_version 1: cluster.invite, cluster.channel_id, hub.url).
 #
+# Agent flow mirror (join, poll, DMs, token refresh §A3): _rjj/context/meshkore/AGENT-DOCS.relay.md
+# Live: https://hub.meshkore.com/platform/docs/agent
+#
 # Corporate networks often block hub.meshkore.com — use the relay for the join POST:
 #   MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh
 #
