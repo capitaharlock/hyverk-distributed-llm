@@ -168,7 +168,7 @@ async fn connect_and_run(
         ram_mb,
         has_gpu,
         layer_range: None, // coordinator assigns dynamically
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        client_version: concat!(env!("CARGO_PKG_VERSION"), "-", env!("GIT_HASH")).to_string(),
         os: std::env::consts::OS.to_string(),
     };
     sink.send(Message::Text(serde_json::to_string(&reg)?.into()))
