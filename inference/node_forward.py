@@ -264,10 +264,15 @@ def load_model_layers(args):
                              scaling, dropout=0.0, **kwargs):
             ks = _repeat_kv(key, module.num_key_value_groups)
             vs = _repeat_kv(value, module.num_key_value_groups)
-            aw = torch.matmul(query.float(), ks.float().transpose(2, 3)).to(query.dtype) * scaling
+            # Keep attention weights in fp32 all the way through softmax.
+            # Qwen2.5-7B layer 27 has k_proj.bias max=442 and the residual
+            # stream grows to ~2000-3500 by layer 26; the resulting Q@K^T
+            # values easily exceed fp16 max (65504), causing Inf → NaN.
+            # fp32 stable-softmax handles these correctly via max subtraction.
+            aw_fp32 = torch.matmul(query.float(), ks.float().transpose(2, 3)) * scaling
             if attention_mask is not None:
-                aw = aw + attention_mask[:, :, :, :ks.shape[-2]]
-            aw = _nn.functional.softmax(aw, dim=-1, dtype=torch.float32).to(query.dtype)
+                aw_fp32 = aw_fp32 + attention_mask[:, :, :, :ks.shape[-2]].float()
+            aw = _nn.functional.softmax(aw_fp32, dim=-1).to(query.dtype)
             aw = _nn.functional.dropout(aw, p=dropout, training=module.training)
             out = torch.matmul(aw, vs)
             return out.transpose(1, 2).contiguous(), aw
@@ -546,12 +551,11 @@ def serve_model(args):
         if device.type == "cpu":
             hidden = hidden.float()
         seq_len = hidden.shape[1]
-        print(f"run_forward_kv: rid={request_id} seq={seq_len} past_seen=TBD is_generate={is_generate}", file=sys.stderr, flush=True)
         if reset_kv:
             kv_cache_state.pop(request_id, None)
         if request_id not in kv_cache_state:
             kv_cache_state[request_id] = {
-                "cache": DynamicCache(config=config),
+                "cache": DynamicCache(),
                 "last_access": time.time(),
             }
             _evict_if_over_capacity()
@@ -564,7 +568,6 @@ def serve_model(args):
         # which breaks position embeddings on every decode step.
         past_seen = (past_key_values.get_seq_length(layer_idx=args.layer_start)
                      if past_key_values is not None else 0)
-        print(f"run_forward_kv: past_seen={past_seen} device={device}", file=sys.stderr, flush=True)
         position_ids = torch.arange(
             past_seen, past_seen + seq_len, device=device, dtype=torch.long
         ).unsqueeze(0)
@@ -635,7 +638,6 @@ def serve_model(args):
                 attn_mask = None
                 if causal_mask_mapping is not None:
                     attn_mask = causal_mask_mapping.get(lt, causal_mask_mapping["full_attention"])
-                print(f"  layer {gi} start", file=sys.stderr, flush=True)
                 try:
                     out = layer(
                         hidden,
@@ -656,9 +658,8 @@ def serve_model(args):
                         position_embeddings=pos_emb,
                     )
                 hidden = out[0] if isinstance(out, tuple) else out
-                print(f"  layer {gi} done", file=sys.stderr, flush=True)
                 if DEBUG_NAN and (torch.isnan(hidden).any() or torch.isinf(hidden).any()):
-                    print("WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
+                    print(f"WARNING: NaN/Inf in hidden after layer {gi}", file=sys.stderr, flush=True)
             if is_generate and norm:
                 hidden = norm(hidden)
         # Flush the MPS command queue after every forward pass. Without this,
@@ -666,7 +667,6 @@ def serve_model(args):
         # process crashes with no Python traceback.
         if device.type == "mps":
             torch.mps.synchronize()
-        print("run_forward_kv: complete", file=sys.stderr, flush=True)
         return hidden
 
     def run_forward(hidden, request_id, is_generate, reset_kv=False):
@@ -740,9 +740,7 @@ def serve_model(args):
                         with torch.inference_mode():
                             ids = torch.tensor([token_ids], device=device, dtype=torch.long)
                             hidden = embed(ids)
-                            print(f"embed: after embed lookup dtype={hidden.dtype} shape={hidden.shape} max={hidden.abs().max().item():.4f} nan={torch.isnan(hidden).any().item()}", file=sys.stderr, flush=True)
                             hidden = run_forward(hidden, request_id, False, reset_kv=True)
-                            print(f"embed: after forward dtype={hidden.dtype} shape={hidden.shape} max={hidden.abs().max().item():.4f} nan={torch.isnan(hidden).any().item()}", file=sys.stderr, flush=True)
                         data = hidden.cpu().half().numpy().tobytes()
                         shape = list(hidden.shape)
                         elapsed = time.time() - t0
@@ -757,10 +755,8 @@ def serve_model(args):
                             with torch.inference_mode():
                                 last_h = hidden[:, -1:, :]
                                 h_n = norm(last_h)
-                                print(f"embed: after norm dtype={h_n.dtype} max={h_n.abs().max().item():.4f} nan={torch.isnan(h_n).any().item()}", file=sys.stderr, flush=True)
                                 logits = torch.nn.functional.linear(h_n.float(), lm_head_weight_fp32)
                                 ll = logits[0, -1].cpu()
-                                print(f"embed: logits nan={torch.isnan(ll).any().item()} max={ll[~torch.isnan(ll)].max().item() if (~torch.isnan(ll)).any() else 'all_nan'}", file=sys.stderr, flush=True)
                                 nan_mask = torch.isnan(ll) | torch.isinf(ll)
                                 if nan_mask.any():
                                     ll = torch.where(nan_mask, torch.tensor(-1e5), ll)
