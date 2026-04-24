@@ -125,7 +125,9 @@ model = "llama-3.3-70b-versatile"
 
 ## Encrypted Files
 
-Some directories (`_rjj/`) are encrypted via [git-crypt](https://github.com/AGWA/git-crypt). They appear as binary blobs without the decryption key.
+Everything under `_rjj/` is encrypted in Git via [git-crypt](https://github.com/AGWA/git-crypt). Without the team key, those paths are opaque binary blobs in history and in clones.
+
+**GitHub visibility:** git-crypt protects **confidentiality** (who can read the *contents*). It does **not** make files visible to “only one GitHub user.” Anyone who can **clone** the repository can still **fetch** the ciphertext for `_rjj/`. To restrict who can access the repo at all, use a **private** GitHub repository and grant access only to the accounts that should clone it (e.g. your user, or a small collaborator list). Combine **private repo** + **git-crypt** if you want both access control and defense-in-depth for `_rjj/`.
 
 **To decrypt (authorized contributors only):**
 
