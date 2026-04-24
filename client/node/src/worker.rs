@@ -19,7 +19,6 @@ fn distributed_cluster_client() -> &'static reqwest::Client {
 }
 
 pub async fn execute_task(
-    _engine: &std::sync::Arc<hyverk_inference::engine::InferenceEngine>,
     task: InferenceTask,
     node_id: &str,
 ) -> SubmitResultRequest {

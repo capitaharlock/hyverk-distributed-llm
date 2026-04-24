@@ -15,7 +15,6 @@ hyverk-synthesis = { path = "../../shared/synthesis" }
 hyverk-sandbox = { path = "../../server/sandbox" }
 hyverk-training = { path = "../../shared/training" }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
-hyverk-inference = { path = "../../client/inference" }
 hyverk-rag = { path = "../../server/rag" }
 tokio = { workspace = true }
 tokio-util = "0.7"

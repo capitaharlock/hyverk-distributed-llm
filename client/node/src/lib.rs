@@ -6,7 +6,6 @@ pub mod ws_worker;
 
 use coordinator_client::CoordinatorConnection;
 use hyverk_core::config::NodeConfig;
-use hyverk_inference::engine::InferenceEngine;
 use hyverk_proto::NodeCapabilities;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -20,19 +19,10 @@ pub async fn run_node(
     config: &NodeConfig,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(InferenceEngine::new(config.models_dir.clone())?);
-    let available_models = engine.list_models();
-    info!(models = ?available_models, "Discovered local models");
-
-    if available_models.is_empty() {
-        warn!(
-            "No GGUF models found in {:?}. Node will register but cannot serve inference.",
-            config.models_dir
-        );
-    }
-
+    // GPU nodes serve Qwen2.5-7B safetensors via the distributed inference pipeline.
+    // Models are not discovered from disk — the coordinator assigns layer ranges on connect.
     let capabilities = NodeCapabilities {
-        available_models: available_models.clone(),
+        available_models: vec!["qwen2.5-7b".to_string()],
         hardware_info: config.hardware_info.clone(),
         max_concurrent_tasks: config.max_concurrent_tasks,
     };
@@ -149,12 +139,11 @@ pub async fn run_node(
         match conn.poll_task().await {
             Ok(Some(task)) => {
                 active_tasks.fetch_add(1, Ordering::Relaxed);
-                let engine = engine.clone();
                 let node_id = node_id.clone();
                 let conn_submit = conn.clone();
                 let active_counter = active_tasks.clone();
                 tokio::spawn(async move {
-                    let result = worker::execute_task(&engine, task, &node_id).await;
+                    let result = worker::execute_task(task, &node_id).await;
                     if let Err(e) = conn_submit.submit_result(result).await {
                         error!("Failed to submit result: {e}");
                     }

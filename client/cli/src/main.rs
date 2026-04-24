@@ -26,16 +26,6 @@ struct Cli {
 enum Commands {
     /// Run the network (default behavior)
     Run,
-    /// List available local models
-    Models,
-    /// Download a GGUF model from Hugging Face
-    Download {
-        /// Hugging Face model URL or repo/file path
-        url: String,
-        /// Output filename (optional, auto-detected from URL)
-        #[arg(short, long)]
-        output: Option<String>,
-    },
     /// Generate training data using free LLM APIs (synthesis mode)
     Synthesize {
         /// Target examples per hour (overrides config)
@@ -128,26 +118,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     match cli.command {
-        Some(Commands::Models) => {
-            let engine = hyverk_inference::engine::InferenceEngine::new(
-                config.node.models_dir.clone(),
-            )?;
-            let models = engine.list_models();
-            if models.is_empty() {
-                println!("No models found in {:?}", config.node.models_dir);
-                println!("Download a GGUF model with: hyverk download <url>");
-            } else {
-                println!("Available models ({:?}):", config.node.models_dir);
-                for m in &models {
-                    println!("  {m}");
-                }
-            }
-            return Ok(());
-        }
-        Some(Commands::Download { url, output }) => {
-            download_model(&config, &url, output.as_deref()).await?;
-            return Ok(());
-        }
         Some(Commands::Synthesize { target_per_hour, hours }) => {
             let syn_config = hyverk_synthesis::SynthesisConfig {
                 enabled: true,
@@ -337,65 +307,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-async fn download_model(
-    config: &HyverkConfig,
-    url: &str,
-    output: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let models_dir = &config.node.models_dir;
-
-    // Ensure models directory exists
-    std::fs::create_dir_all(models_dir)?;
-
-    // Determine output filename
-    let filename = match output {
-        Some(name) => name.to_string(),
-        None => url
-            .split('/')
-            .last()
-            .unwrap_or("model.gguf")
-            .to_string(),
-    };
-
-    let dest = models_dir.join(&filename);
-    if dest.exists() {
-        println!("Model already exists: {}", dest.display());
-        return Ok(());
-    }
-
-    println!("Downloading {url}");
-    println!("  -> {}", dest.display());
-
-    let client = reqwest::Client::new();
-    let resp = client.get(url).send().await?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Download failed: HTTP {}", resp.status()).into());
-    }
-
-    let total = resp.content_length();
-    let mut file = tokio::fs::File::create(&dest).await?;
-    let mut stream = resp.bytes_stream();
-    let mut downloaded: u64 = 0;
-
-    use tokio::io::AsyncWriteExt;
-    use futures_util::StreamExt;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk).await?;
-        downloaded += chunk.len() as u64;
-        if let Some(total) = total {
-            let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
-            print!("\r  {downloaded}/{total} bytes ({pct}%)");
-        } else {
-            print!("\r  {downloaded} bytes");
-        }
-    }
-    println!();
-
-    file.flush().await?;
-    println!("Done! Model saved as: {filename}");
-    println!("Use with: --model {}", filename.trim_end_matches(".gguf"));
-    Ok(())
-}

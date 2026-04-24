@@ -6,7 +6,6 @@ members = [
     "server/sandbox",
     # Client
     "client/node",
-    "client/inference",
     "client/candle-server",
     "client/cli",
     # Shared
