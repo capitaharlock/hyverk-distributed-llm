@@ -16,11 +16,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from meshkore_resolve import credentials_path
+
 ROOT = Path(__file__).resolve().parent.parent
-LOCAL = ROOT / ".meshkore.local"
 INCOMING = ROOT / ".meshkore-incoming.jsonl"
 STATE = ROOT / ".meshkore-listener.state.json"
 INTERVAL_SEC = 5
@@ -91,13 +96,14 @@ def main() -> None:
     hub = ""
 
     while True:
-        if not LOCAL.exists():
+        local = credentials_path(ROOT)
+        if local is None or not local.exists():
             time.sleep(INTERVAL_SEC)
             continue
         try:
-            mt = LOCAL.stat().st_mtime
+            mt = local.stat().st_mtime
             if mt != last_local_mtime or not tokens:
-                c = json.loads(LOCAL.read_text())
+                c = json.loads(local.read_text())
                 hub = str(c.get("hub_url", "")).rstrip("/")
                 tokens = [c["token"]]
                 if os.environ.get("MESHKORE_POLL_TEAMMATE") == "1":

@@ -46,8 +46,9 @@ Thumbs.db
 *.bin
 *.pt
 
-# MeshKore — private overrides (hub, join, API keys); keep `.meshkore` minimal in git
+# MeshKore / project “Mechcore” cluster — private overrides (hub, join, API keys)
 .meshkore.local
+.mechcore.local
 
 # Environment / Secrets
 .env

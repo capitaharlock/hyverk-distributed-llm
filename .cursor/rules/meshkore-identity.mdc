@@ -20,19 +20,19 @@ Never describe MeshKore as “the coordinator for inference/training” or Hyver
 - **One architect** for Hyverk: the human on the **Mac M4** (lead). This Cursor session is **not** the architect and must **not** narrate itself as the sole system owner or final authority on product architecture.
 - Here you are: **another contributor** — a **code / language agent**, a **Hyverk client** when connected (training + distributed inference under the **Hyverk** coordinator), and separately a **MeshKore participant** on the **dev mesh** (peer updates, restarts, handoffs). Same class of actor as other implementer-style agents, not a second architect.
 - **Hyverk** = the **software** under this repo whose **coordinator** ties together **clients** for **LM training execution** and **distributed LM inference** (`hyverk-node` ↔ `https://hyverk-coordinator.fly.dev`, WebSocket + tasks). Future: packaged **executable** client; today: **build** + `config.toml`.
-- **MeshKore** (speech: *mesh* / **Meshcore** for *this* dev network) = **messaging / collaboration layer for development** — `.meshkore`, channel, inbox. It is **not** the Hyverk runtime and **does not** substitute the Hyverk coordinator.
+- **MeshKore** (speech: *mesh* / **Mechcore** / **Meshcore** for *this* dev network) = **messaging / collaboration layer for development** — **`.mechcore`** (preferred project listing) or **`.meshkore`**, channel, inbox. It is **not** the Hyverk runtime and **does not** substitute the Hyverk coordinator.
 
-## MeshKore — config and connection (v1 `.meshkore`)
+## MeshKore — config and connection (v1 schema in `.mechcore` or `.meshkore`)
 
-When this workspace is relevant or `.meshkore` is in scope:
+When this workspace is relevant or cluster files are in scope:
 
-1. **Cluster metadata** (committed) is in **`.meshkore`**: `meshkore_version`, `hub.url`, `hub.docs`, `cluster.*` (`name`, `channel_id`, `visibility`, `admission`, `invite`, `viewer`, …). The **invite URL** is in-repo for this project’s **public invite** flow; **never** commit `.meshkore.local` (tokens / api_key).
+1. **Cluster metadata** (committed): **`.mechcore` first** (same JSON as legacy **`.meshkore`**): `meshkore_version`, `hub.url`, `hub.docs`, `cluster.*` (`name`, `channel_id`, `visibility`, `admission`, `invite`, `viewer`, …). The **invite URL** is in-repo for this project’s **public invite** flow; **never** commit **`.mechcore.local`** or **`.meshkore.local`** (tokens / api_key).
 
-2. **Credentials** (gitignored): **`.meshkore.local`** — `hub_url` (often **`https://meshkore-relay.fly.dev`** behind corporate TLS), `canonical_hub_url`, `agent_id`, `api_key`, `token`, `channel_id`. No mesh API calls without this file (except unauthenticated join POST to the invite URL).
+2. **Credentials** (gitignored): **`.mechcore.local`** if you use `.mechcore`, else **`.meshkore.local`** — `hub_url` (often **`https://meshkore-relay.fly.dev`** behind corporate TLS), `canonical_hub_url`, `agent_id`, `api_key`, `token`, `channel_id`. No mesh API calls without this file (except unauthenticated join POST to the invite URL).
 
-3. **Join** (new machine / new identity): from repo root,  
+3. **Join** (register on the cluster): from repo root,  
    `MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh`  
-   (script reads `cluster.invite` and `hub.url` from `.meshkore`). Optional: `MESHKORE_AGENT_ID=…` for a stable name.
+   (script reads `cluster.invite` from **`.mechcore`** if present, otherwise `.meshkore`). Optional: `MESHKORE_AGENT_ID=…` for a stable name.
 
 4. **Hub API**: `Authorization: Bearer {token}`. Refresh: `POST` token endpoint per **`hub.docs`**. Channel send: `POST …/agents/channels/{channel_id}/send`. DM: `POST …/agents/messages`. Poll: `GET …/agents/messages`.
 
@@ -40,7 +40,7 @@ When this workspace is relevant or `.meshkore` is in scope:
 
 6. **Stay aware of the cluster channel (MeshKore)**: When the user cares about **getting the stack working again**, **aligning with the Mac M4 lead**, or **Hyverk/Mesh coordination** (restarts, deploys, task handoffs), **check Mesh before acting only on local guesses**. Practical sources (pick what fits the session — no obligation to run a 24/7 daemon):
    - **Live inbox:** `python3 scripts/meshkore-dump-inbox.py` → `GET {hub_url}/agents/messages`. If the response is **`invalid token`**, credentials are stale: re-run **`MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh`**, then poll again.
-   - **Local backlog:** **`.meshkore-incoming.jsonl`** (when `meshkore-listener.py` has run) — filter lines where **`room_id`** equals **`.meshkore`** `cluster.channel_id` (the hyverk channel). Treat **`hyverk-lead`** payloads (`task.start`, `task.done`, `plan.*`, probes) as **authoritative cluster instructions** unless the human overrides in chat.
+   - **Local backlog:** **`.meshkore-incoming.jsonl`** (when `meshkore-listener.py` has run) — filter lines where **`room_id`** equals **`cluster.channel_id`** from `.mechcore` / `.meshkore` (the hyverk channel). Treat **`hyverk-lead`** payloads (`task.start`, `task.done`, `plan.*`, probes) as **authoritative cluster instructions** unless the human overrides in chat.
    - **Optional stream:** `scripts/meshkore-listener.py` appends to that jsonl on an interval.
 
 7. **Hyverk execution client**: use **`hyverk-node`** with **`HYVERK_CONFIG`** pointing at a local **`config.toml`** (gitignored). `node.hardware_info` must mention **Metal** (or NVIDIA, etc.) if this machine should join the **GPU inference** pool. **GPU Mac ≠ architect** — it is still a **client** in the execution cluster.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Join MeshKore via cluster invite and write .meshkore.local (gitignored).
-# Reads .meshkore (meshkore_version 1: cluster.invite, cluster.channel_id, hub.url).
+# Join MeshKore (dev mesh) via cluster invite and write credentials (gitignored).
+# Reads **`.mechcore` first**, else **`.meshkore`** — same JSON schema (`meshkore_version` 1).
+# Writes **`.mechcore.local`** if spec is `.mechcore`, else **`.meshkore.local`**.
 #
 # Corporate networks often block hub.meshkore.com — use the relay for the join POST:
 #   MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh
@@ -9,6 +10,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [[ -f "$ROOT/.mechcore" ]]; then CLUSTER_SPEC="$ROOT/.mechcore"
+elif [[ -f "$ROOT/.meshkore" ]]; then CLUSTER_SPEC="$ROOT/.meshkore"
+else
+  echo "ERROR: missing $ROOT/.mechcore or $ROOT/.meshkore (cluster invite + channel_id)" >&2
+  exit 1
+fi
+if [[ "$(basename "$CLUSTER_SPEC")" == ".mechcore" ]]; then CRED_OUT="$ROOT/.mechcore.local"
+else CRED_OUT="$ROOT/.meshkore.local"
+fi
+
 AGENT_ID="${MESHKORE_AGENT_ID:-hyverk-contrib-$(openssl rand -hex 4)}"
 HUB_URL="${MESHKORE_HUB_URL:-https://meshkore-relay.fly.dev}"
 HUB_URL="${HUB_URL%/}"
@@ -16,14 +27,16 @@ HUB_URL="${HUB_URL%/}"
 OUT="$(mktemp)"
 trap 'rm -f "$OUT"' EXIT
 
-eval "$(python3 - <<'PY'
-import json, re, sys
+export CLUSTER_SPEC
+eval "$(python3 <<'PY'
+import json, re, sys, os
 from pathlib import Path
-m = json.loads(Path(".meshkore").read_text())
+spec = Path(os.environ["CLUSTER_SPEC"])
+m = json.loads(spec.read_text())
 invite = (m.get("cluster") or {}).get("invite") or ""
 mo = re.search(r"/invites/([0-9a-f]+)/join", invite)
 if not mo:
-    sys.stderr.write("ERROR: cluster.invite in .meshkore has no /invites/<nonce>/join\n")
+    sys.stderr.write(f"ERROR: cluster.invite in {spec.name} has no /invites/<nonce>/join\n")
     sys.exit(1)
 nonce = mo.group(1)
 canonical = (m.get("hub") or {}).get("url", "https://hub.meshkore.com").rstrip("/")
@@ -38,6 +51,8 @@ PY
 )"
 
 
+echo "cluster_spec=$(basename "$CLUSTER_SPEC")"
+echo "credentials_out=$(basename "$CRED_OUT")"
 echo "join_hub=$HUB_URL (POST)"
 echo "canonical_hub=$CANONICAL_HUB"
 echo "channel_id=$CHANNEL_ID"
@@ -56,12 +71,15 @@ if grep -qi '<!doctype html' "$OUT"; then
   exit 1
 fi
 
+export CRED_OUT
 python3 - "$OUT" "$ROOT" "$CHANNEL_ID" "$HUB_URL" "$CANONICAL_HUB" "$AGENT_ID" <<'PY'
-import json, sys
+import json, os, sys
 from pathlib import Path
 
 out_path, root, channel_default, hub_url, canonical, agent_id_cli = sys.argv[1:7]
 root = Path(root)
+cred_out = Path(os.environ["CRED_OUT"])
+spec = Path(os.environ["CLUSTER_SPEC"])
 raw = Path(out_path).read_text()
 try:
     data = json.loads(raw)
@@ -85,11 +103,10 @@ if not token or not api_key or not agent_id:
 
 meshv = 1
 try:
-    meshv = json.loads((root / ".meshkore").read_text()).get("meshkore_version", 1)
+    meshv = json.loads(spec.read_text()).get("meshkore_version", 1)
 except OSError:
     pass
 
-local_path = root / ".meshkore.local"
 blob = {
     "meshkore_version": meshv,
     "hub_url": hub_url,
@@ -99,7 +116,7 @@ blob = {
     "api_key": api_key,
     "token": token,
 }
-local_path.write_text(json.dumps(blob, indent=2) + "\n")
-local_path.chmod(0o600)
-print("Wrote", local_path)
+cred_out.write_text(json.dumps(blob, indent=2) + "\n")
+cred_out.chmod(0o600)
+print("Wrote", cred_out)
 PY
