@@ -647,23 +647,27 @@ async fn proxy_distributed_inference(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Find a GPU node that can serve as cluster entry point
-    let nodes = state.registry.list_nodes().await;
-    let gpu_node = nodes.iter().find(|n| {
-        let hw = &n.capabilities.hardware_info;
-        hw.contains("M1") || hw.contains("M2") || hw.contains("M3") || hw.contains("M4")
-            || hw.contains("NVIDIA") || hw.contains("RTX")
-    });
-
-    if gpu_node.is_none() {
-        return Json(serde_json::json!({"error": "No GPU nodes available for inference"})).into_response();
+    // CLUSTER_ENTRY_URL takes priority — if set, route directly without checking registered nodes.
+    // If not set, require at least one GPU node to be registered.
+    let cluster_url = std::env::var("CLUSTER_ENTRY_URL").unwrap_or_default();
+    if cluster_url.is_empty() {
+        let nodes = state.registry.list_nodes().await;
+        let has_gpu = nodes.iter().any(|n| {
+            let hw = &n.capabilities.hardware_info;
+            hw.contains("M1") || hw.contains("M2") || hw.contains("M3") || hw.contains("M4")
+                || hw.contains("NVIDIA") || hw.contains("RTX")
+        });
+        if !has_gpu {
+            return Json(serde_json::json!({
+                "error": "No GPU cluster available. Set CLUSTER_ENTRY_URL or register GPU nodes."
+            })).into_response();
+        }
     }
-
-    // Forward the request to the node's inference endpoint
-    // The node ID tells us where to send it — nodes register their HTTP address
-    // For now: use a configurable cluster URL from env
-    let cluster_url = std::env::var("CLUSTER_ENTRY_URL")
-        .unwrap_or_else(|_| "http://localhost:18000".to_string());
+    let cluster_url = if cluster_url.is_empty() {
+        "http://localhost:18200".to_string()
+    } else {
+        cluster_url
+    };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
