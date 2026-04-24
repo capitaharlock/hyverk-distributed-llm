@@ -739,13 +739,37 @@ async fn serve_model_config() -> impl IntoResponse {
     let index_path = "/data/model/model.safetensors.index.json";
     let config_path = "/data/model/config.json";
 
-    let index = tokio::fs::read_to_string(index_path).await.unwrap_or_default();
-    let config = tokio::fs::read_to_string(config_path).await.unwrap_or_default();
+    let index_raw = tokio::fs::read_to_string(index_path).await.unwrap_or_default();
+    let config_raw = tokio::fs::read_to_string(config_path).await.unwrap_or_default();
+
+    let index_val: serde_json::Value =
+        serde_json::from_str(index_raw.trim()).unwrap_or(serde_json::Value::Null);
+    let config_val: serde_json::Value =
+        serde_json::from_str(config_raw.trim()).unwrap_or(serde_json::Value::Null);
+
+    let index_ok = index_val
+        .get("weight_map")
+        .and_then(|w| w.as_object())
+        .is_some_and(|m| !m.is_empty());
+    let config_ok = config_val
+        .get("num_hidden_layers")
+        .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|i| i as u64)))
+        .is_some();
+
+    if !(index_ok && config_ok) {
+        return Json(serde_json::json!({
+            "available": false,
+            "config": null,
+            "index": null,
+            "coordinator_model_status": "missing_or_invalid",
+            "hint": "Coordinator reads /data/model/{config.json,model.safetensors.index.json,tokenizer.json,*.safetensors}. Mount or copy a full sharded checkpoint there (Fly: volume + upload). Nodes poll GET /api/v1/model/config before layer download.",
+        }));
+    }
 
     Json(serde_json::json!({
-        "available": !index.is_empty(),
-        "index": serde_json::from_str::<serde_json::Value>(&index).unwrap_or_default(),
-        "config": serde_json::from_str::<serde_json::Value>(&config).unwrap_or_default(),
+        "available": true,
+        "index": index_val,
+        "config": config_val,
     }))
 }
 

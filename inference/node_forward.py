@@ -171,9 +171,17 @@ def download_layers(args):
     url = f"{args.coordinator}/api/v1/model/config"
     resp = json.loads(urllib.request.urlopen(url, timeout=30).read())
     if not resp.get("available"):
-        err = "Model not available on coordinator (publish shards / set available on Fly)"
+        hint = (resp.get("hint") or "").strip()
+        status = (resp.get("coordinator_model_status") or "").strip()
+        err = "Model not available on coordinator"
+        if status:
+            err = f"{err} ({status})"
+        if hint:
+            err = f"{err}. {hint}"
+        else:
+            err = f"{err} (leader: populate /data/model on Fly coordinator — see coordinator GET /api/v1/model/config hint after deploy)"
         print(err, file=sys.stderr)
-        print(json.dumps({"error": err}))
+        print(json.dumps({"error": err, "coordinator_model_status": status or None, "hint": hint or None}))
         sys.exit(1)
 
     index = resp["index"]
