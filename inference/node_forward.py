@@ -384,9 +384,18 @@ def load_model_layers(args):
     return config, device, rotary, layers, embed, norm, lm_head, lm_head_weight_fp32
 
 def serve_model(args):
-    """Persistent HTTP server — loads model once, handles requests via HTTP."""
-    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-    import struct, threading
+    """Persistent HTTP + TCP inference server — loads model once, serves concurrently.
+
+    HTTP on args.port  — JSON and binary inference, health endpoint always fast.
+    TCP  on args.port+1 — binary hidden-state transfers with 4B-length-prefix framing,
+                          lower per-hop overhead than WebSocket for distributed pipeline.
+    GPU work is serialised via a single-worker ThreadPoolExecutor; the asyncio event
+    loop handles all I/O concurrently without blocking on GPU calls.
+    """
+    import struct, threading, asyncio
+    from collections import OrderedDict
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import asynccontextmanager
 
     print(f"Loading model layers {args.layer_start}-{args.layer_end}...", file=sys.stderr)
     t0 = time.time()
@@ -405,78 +414,49 @@ def serve_model(args):
         create_causal_mask = None
         create_sliding_window_causal_mask = None
 
-    # request_id -> {"cache": DynamicCache, "last_access": ts}. OrderedDict gives
-    # us O(1) LRU via move_to_end on every access. Old behaviour was FIFO via
-    # next(iter(dict)), which would evict a long-running active request just
-    # because it was created first. HYVERK_KV_MAX_ENTRIES tunes the budget.
-    from collections import OrderedDict
+    # request_id -> {"cache": DynamicCache, "last_access": ts}
     kv_cache_state = OrderedDict()
-    MAX_CACHE_ENTRIES = max(1, _env_int("HYVERK_KV_MAX_ENTRIES", 8))
+    MAX_CACHE_ENTRIES = max(1, _env_int("HYVERK_KV_MAX_ENTRIES", 16))
+    # kv_lock protects dict mutations only — GPU forward runs without holding it.
+    # The single-worker executor already serialises concurrent inference calls;
+    # kv_lock only guards the reaper thread vs the executor thread.
+    kv_lock = threading.Lock()
 
     def _touch(rid):
-        """Mark request_id as most-recently-used (no-op if not present)."""
         if rid in kv_cache_state:
             kv_cache_state.move_to_end(rid)
             kv_cache_state[rid]["last_access"] = time.time()
 
     def _evict_if_over_capacity():
-        """Drop the least-recently-used entries until we're at budget."""
         _lru_evict(kv_cache_state, MAX_CACHE_ENTRIES, log_prefix="KV cache")
 
-    # Serialises all GPU work across concurrent HTTP threads. /health and other
-    # non-model endpoints stay lock-free so they stay responsive during inference.
-    model_lock = threading.Lock()
     started_at = time.time()
-
-    # Idle timeout: drop KV entries not touched for N seconds. Prevents leaks
-    # when a coordinator drops a request without sending InferenceEnd (client
-    # crash, network drop). HYVERK_KV_IDLE_TIMEOUT_S=0 disables the reaper.
-    # HYVERK_KV_REAPER_INTERVAL_S controls sweep frequency (min 5s).
     IDLE_TIMEOUT_S = max(0, _env_int("HYVERK_KV_IDLE_TIMEOUT_S", 300))
     REAPER_INTERVAL_S = max(5, _env_int("HYVERK_KV_REAPER_INTERVAL_S", 30))
 
     def _reap_idle_kv():
-        """Background sweeper — drops entries untouched for IDLE_TIMEOUT_S."""
         while True:
             try:
                 time.sleep(REAPER_INTERVAL_S)
                 if IDLE_TIMEOUT_S <= 0 or not kv_cache_state:
                     continue
                 now = time.time()
-                # Grab the model_lock so we don't race with in-flight inference
-                # mutating kv_cache_state. /health reads lock-free; that's OK —
-                # it only snapshots counters, never dereferences the caches.
-                if not model_lock.acquire(timeout=5):
-                    continue
-                try:
+                with kv_lock:
                     stale = [
                         rid for rid, entry in list(kv_cache_state.items())
                         if now - entry.get("last_access", now) > IDLE_TIMEOUT_S
                     ]
                     for rid in stale:
                         kv_cache_state.pop(rid, None)
-                        print(
-                            f"KV cache idle-timeout eviction: dropped {rid} "
-                            f"(idle > {IDLE_TIMEOUT_S}s)",
-                            file=sys.stderr,
-                        )
-                finally:
-                    model_lock.release()
+                        print(f"KV cache idle-timeout eviction: dropped {rid} (idle >{IDLE_TIMEOUT_S}s)", file=sys.stderr)
             except Exception as e:
-                # Reaper crashing must not take the server down.
                 print(f"KV reaper warning: {e}", file=sys.stderr)
 
     if IDLE_TIMEOUT_S > 0:
-        t = threading.Thread(target=_reap_idle_kv, daemon=True, name="kv-reaper")
-        t.start()
-        print(
-            f"KV cache idle-reaper: timeout={IDLE_TIMEOUT_S}s "
-            f"interval={REAPER_INTERVAL_S}s",
-            file=sys.stderr,
-        )
+        threading.Thread(target=_reap_idle_kv, daemon=True, name="kv-reaper").start()
+        print(f"KV cache idle-reaper: timeout={IDLE_TIMEOUT_S}s interval={REAPER_INTERVAL_S}s", file=sys.stderr)
 
-    # Warmup pass — compile Metal/CUDA kernels before serving requests.
-    # Includes lm_head to avoid 60s+ JIT stall on the first real request.
+    # Warmup pass — compiles Metal/CUDA kernels before serving any request.
     print("Running warmup pass...", file=sys.stderr)
     with torch.inference_mode():
         dummy = torch.randn(1, 4, config.hidden_size, device=device, dtype=torch.float16)
@@ -493,6 +473,10 @@ def serve_model(args):
             torch.mps.synchronize()
     print("Warmup done", file=sys.stderr)
 
+    # ------------------------------------------------------------------
+    # Forward helpers (GPU work — always called from the gpu_executor thread)
+    # ------------------------------------------------------------------
+
     def run_forward_legacy(hidden, request_id, is_generate):
         """Full attention mask (no KV) — fallback when DynamicCache is unavailable."""
         seq_len = hidden.shape[1]
@@ -501,30 +485,18 @@ def serve_model(args):
         position_ids = cache_position.unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
         min_val = torch.finfo(dtype).min
-        causal_mask = torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device)
-        causal_mask = torch.triu(causal_mask, diagonal=1)
-        causal_mask = causal_mask[None, None, :, :]
+        causal_mask = torch.triu(
+            torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device), diagonal=1
+        )[None, None, :, :]
         with torch.inference_mode():
             for layer in layers:
                 try:
-                    out = layer(
-                        hidden,
-                        attention_mask=causal_mask,
-                        position_ids=position_ids,
-                        past_key_values=None,
-                        use_cache=False,
-                        cache_position=cache_position,
-                        position_embeddings=pos_emb,
-                    )
+                    out = layer(hidden, attention_mask=causal_mask, position_ids=position_ids,
+                                past_key_values=None, use_cache=False,
+                                cache_position=cache_position, position_embeddings=pos_emb)
                 except TypeError:
-                    out = layer(
-                        hidden,
-                        attention_mask=causal_mask,
-                        position_ids=position_ids,
-                        past_key_value=None,
-                        use_cache=False,
-                        position_embeddings=pos_emb,
-                    )
+                    out = layer(hidden, attention_mask=causal_mask, position_ids=position_ids,
+                                past_key_value=None, use_cache=False, position_embeddings=pos_emb)
                 hidden = out[0] if isinstance(out, tuple) else out
                 if DEBUG_NAN and (torch.isnan(hidden).any() or torch.isinf(hidden).any()):
                     print("WARNING: NaN/Inf in hidden after layer", file=sys.stderr)
@@ -535,56 +507,40 @@ def serve_model(args):
         return hidden
 
     def run_forward_kv(hidden, request_id, is_generate, reset_kv):
-        """Prefill / decode with HuggingFace DynamicCache (matches Qwen2Model path)."""
+        """Prefill / decode with HuggingFace DynamicCache."""
         if not layers:
             with torch.inference_mode():
                 if is_generate and norm:
                     hidden = norm(hidden)
             return hidden
 
-        # Ensure contiguity — tensors received from numpy (binary HTTP body) or
-        # another device may have non-standard strides that trigger MPS faults.
         hidden = hidden.contiguous()
-        # Dynamic int8-quantized CPU layers require float32 activations; the KV
-        # cache will also store float32 keys/values which avoids a decode-step
-        # crash caused by the quantized attn reading fp16 from the cache.
         if device.type == "cpu":
             hidden = hidden.float()
         seq_len = hidden.shape[1]
-        if reset_kv:
-            kv_cache_state.pop(request_id, None)
-        if request_id not in kv_cache_state:
-            kv_cache_state[request_id] = {
-                "cache": DynamicCache(),
-                "last_access": time.time(),
-            }
-            _evict_if_over_capacity()
-        else:
-            # LRU bump — this request is being actively used, keep it warm.
-            _touch(request_id)
-        past_key_values = kv_cache_state[request_id]["cache"]
-        # Use layer_idx=args.layer_start so DynamicCache reads the correct slot.
-        # Default (layer_idx=0) returns 0 when this node only holds layers 14+,
-        # which breaks position embeddings on every decode step.
-        past_seen = (past_key_values.get_seq_length(layer_idx=args.layer_start)
-                     if past_key_values is not None else 0)
+
+        # Brief lock: dict mutations only. GPU forward runs without holding kv_lock.
+        with kv_lock:
+            if reset_kv:
+                kv_cache_state.pop(request_id, None)
+            if request_id not in kv_cache_state:
+                kv_cache_state[request_id] = {"cache": DynamicCache(), "last_access": time.time()}
+                _evict_if_over_capacity()
+            else:
+                _touch(request_id)
+            past_key_values = kv_cache_state[request_id]["cache"]
+            past_seen = (past_key_values.get_seq_length(layer_idx=args.layer_start)
+                         if past_key_values is not None else 0)
+
         position_ids = torch.arange(
             past_seen, past_seen + seq_len, device=device, dtype=torch.long
         ).unsqueeze(0)
         pos_emb = rotary(hidden, position_ids)
-
-        # Pure decode (seq=1 appended to existing cache): no mask needed. A single new
-        # query attends to cached keys + itself; there is no future position to hide.
-        # Skipping create_causal_mask here saves the per-step tensor allocation that
-        # dominated the decode-step cost on prefill-heavy runs.
         is_decode_step = (seq_len == 1 and past_seen > 0)
-
         cache_position = torch.arange(past_seen, past_seen + seq_len, device=device)
 
         causal_mask_mapping = None
         if create_causal_mask is not None and not is_decode_step:
-            # Try the transformers ≥4.48 signature first (input_embeds + cache_position),
-            # then fall back to older kwarg sets, then manual upper-triangular mask.
             mask = None
             for mask_kwargs in [
                 dict(config=config, input_embeds=hidden, attention_mask=None,
@@ -596,19 +552,16 @@ def serve_model(args):
                      past_key_values=past_key_values, position_ids=position_ids),
             ]:
                 try:
-                    mask = create_causal_mask(**mask_kwargs)
-                    break
+                    mask = create_causal_mask(**mask_kwargs); break
                 except TypeError:
                     continue
             if mask is None:
-                # Manual fallback: upper-triangular float mask
                 dtype = hidden.dtype
                 min_val = torch.finfo(dtype).min
                 total_len = past_seen + seq_len
                 m = torch.zeros(1, 1, seq_len, total_len, dtype=dtype, device=device)
                 m[:, :, :, past_seen:] = torch.triu(
-                    torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device),
-                    diagonal=1,
+                    torch.full((seq_len, seq_len), min_val, dtype=dtype, device=device), diagonal=1
                 )
                 mask = m
             causal_mask_mapping = {"full_attention": mask}
@@ -621,8 +574,7 @@ def serve_model(args):
                          past_key_values=past_key_values, position_ids=position_ids),
                 ]:
                     try:
-                        causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
-                        break
+                        causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs); break
                     except TypeError:
                         continue
 
@@ -639,32 +591,18 @@ def serve_model(args):
                 if causal_mask_mapping is not None:
                     attn_mask = causal_mask_mapping.get(lt, causal_mask_mapping["full_attention"])
                 try:
-                    out = layer(
-                        hidden,
-                        attention_mask=attn_mask,
-                        position_ids=position_ids,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        position_embeddings=pos_emb,
-                    )
+                    out = layer(hidden, attention_mask=attn_mask, position_ids=position_ids,
+                                past_key_values=past_key_values, use_cache=True,
+                                position_embeddings=pos_emb)
                 except TypeError:
-                    out = layer(
-                        hidden,
-                        attention_mask=attn_mask,
-                        position_ids=position_ids,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        cache_position=cache_position,
-                        position_embeddings=pos_emb,
-                    )
+                    out = layer(hidden, attention_mask=attn_mask, position_ids=position_ids,
+                                past_key_values=past_key_values, use_cache=True,
+                                cache_position=cache_position, position_embeddings=pos_emb)
                 hidden = out[0] if isinstance(out, tuple) else out
                 if DEBUG_NAN and (torch.isnan(hidden).any() or torch.isinf(hidden).any()):
                     print(f"WARNING: NaN/Inf in hidden after layer {gi}", file=sys.stderr, flush=True)
             if is_generate and norm:
                 hidden = norm(hidden)
-        # Flush the MPS command queue after every forward pass. Without this,
-        # the Metal command buffer fills up after ~20 decode steps and the
-        # process crashes with no Python traceback.
         if device.type == "mps":
             torch.mps.synchronize()
         return hidden
@@ -674,296 +612,367 @@ def serve_model(args):
             return run_forward_legacy(hidden, request_id, is_generate)
         return run_forward_kv(hidden, request_id, is_generate, reset_kv)
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *a): pass
+    # ------------------------------------------------------------------
+    # Core inference handler — synchronous, runs inside gpu_executor thread.
+    # Returns (status_code: int, headers: dict[str,str], body: bytes).
+    # ------------------------------------------------------------------
 
-        def _json(self, code, obj):
-            body = json.dumps(obj).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    def handle_inference_sync(body: bytes, raw_headers: dict):
+        import numpy as np
+        ct = raw_headers.get("content-type", "")
+        mode = raw_headers.get("x-mode", "")
+        shape_str = raw_headers.get("x-shape", "")
+        request_id = raw_headers.get("x-request-id", "")
+        t0 = time.time()
 
-        def do_GET(self):
-            if self.path in ("/health", "/healthz", "/"):
-                # Lock-free: reads only snapshot counters. Safe because Python dict
-                # len() and DynamicCache.get_seq_length() are atomic for our usage.
-                entries = []
-                for rid, v in list(kv_cache_state.items()):
-                    cache = v.get("cache")
-                    try:
-                        seen = cache.get_seq_length() if cache is not None else 0
-                    except Exception:
-                        seen = 0
-                    entries.append({"request_id": rid, "kv_tokens": int(seen)})
-                self._json(200, {
-                    "status": "ready",
-                    "device": str(device),
-                    "layers": f"{args.layer_start}-{args.layer_end}",
-                    "port": args.port,
-                    "kv_incremental": DynamicCache is not None,
-                    "active_requests": len(kv_cache_state),
-                    "max_cache_entries": MAX_CACHE_ENTRIES,
-                    "uptime_s": int(time.time() - started_at),
-                    "kv_entries": entries,
-                })
-                return
-            self._json(404, {"error": f"unknown path {self.path}"})
+        def _fhdr(name, default):
+            v = raw_headers.get(name)
+            try: return float(v) if v is not None and v != "" else default
+            except ValueError: return default
+        def _ihdr(name, default):
+            v = raw_headers.get(name)
+            try: return int(v) if v is not None and v != "" else default
+            except ValueError: return default
 
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            content_type = self.headers.get("Content-Type", "")
-            mode = self.headers.get("X-Mode", "")
-            shape_str = self.headers.get("X-Shape", "")
-            request_id = self.headers.get("X-Request-Id", "")
+        def _json_resp(code, obj):
+            b = json.dumps(obj).encode()
+            return code, {"content-type": "application/json", "content-length": str(len(b))}, b
 
-            t0 = time.time()
-            # Serialise GPU work. Parsing the body inside the lock is cheap and lets
-            # us treat the model state (kv_cache_state, cache objects) as exclusive.
-            acquired = model_lock.acquire(timeout=300)
-            if not acquired:
-                self._json(503, {"error": "model busy (lock timeout)"})
-                return
-            try:
-                if content_type == "application/json":
-                    body = self.rfile.read(length)
-                    req = json.loads(body)
-                    mode = req.get("mode", mode or "forward")
-                    request_id = req.get("request_id", request_id)
+        try:
+            if ct == "application/json" or (body and body[:1] == b"{"):
+                req = json.loads(body)
+                mode = req.get("mode", mode or "forward")
+                request_id = req.get("request_id", request_id)
 
-                    if mode == "embed":
-                        token_ids = req["token_ids"]
-                        temperature = float(req.get("temperature", DEFAULT_TEMPERATURE))
-                        top_p = float(req.get("top_p", DEFAULT_TOP_P))
-                        top_k = int(req.get("top_k", DEFAULT_TOP_K))
-                        with torch.inference_mode():
-                            ids = torch.tensor([token_ids], device=device, dtype=torch.long)
-                            hidden = embed(ids)
-                            hidden = run_forward(hidden, request_id, False, reset_kv=True)
-                        data = hidden.cpu().half().numpy().tobytes()
-                        shape = list(hidden.shape)
-                        elapsed = time.time() - t0
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/octet-stream")
-                        self.send_header("X-Shape", json.dumps(shape))
-                        self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
-                        self.send_header("Content-Length", str(len(data)))
-                        # X-Next-Token: predict next token from last hidden (if lm_head available).
-                        # Lets single-node clients avoid a separate lm_head_only call.
-                        if lm_head_weight_fp32 is not None and norm is not None:
-                            with torch.inference_mode():
-                                last_h = hidden[:, -1:, :]
-                                h_n = norm(last_h)
-                                logits = torch.nn.functional.linear(h_n.float(), lm_head_weight_fp32)
-                                ll = logits[0, -1].cpu()
-                                nan_mask = torch.isnan(ll) | torch.isinf(ll)
-                                if nan_mask.any():
-                                    ll = torch.where(nan_mask, torch.tensor(-1e5), ll)
-                                ll[0] = -1e5
-                            self.send_header("X-Next-Token", str(_sample_next_token(ll, temperature, top_p, top_k)))
-                        self.end_headers()
-                        self.wfile.write(data)
-                        return
-
-                    if mode == "lm_head_only":
-                        # Single-node decode: apply norm + lm_head to an existing
-                        # hidden state (output of the last decoder layer) WITHOUT
-                        # re-running any decoder layers. Use after embed/embed_step
-                        # to predict the next token on a full-model node.
-                        if lm_head_weight_fp32 is None:
-                            self._json(503, {"error": "lm_head not available on this node"})
-                            return
-                        hidden_raw = req.get("hidden")  # optional inline float list
-                        if hidden_raw is not None:
-                            import numpy as np
-                            arr = np.array(hidden_raw, dtype=np.float16).reshape(1, 1, config.hidden_size)
-                            h = torch.from_numpy(arr.copy()).to(device)
-                        else:
-                            # Use last KV-cached hidden from the most recent forward pass
-                            self._json(400, {"error": "lm_head_only requires 'hidden' field"})
-                            return
-
-                        def _fhdr(n, d):
-                            v = self.headers.get(n); return float(v) if v else d
-                        def _ihdr(n, d):
-                            v = self.headers.get(n); return int(v) if v else d
-                        temperature = _fhdr("X-Temperature", DEFAULT_TEMPERATURE)
-                        top_p = _fhdr("X-Top-P", DEFAULT_TOP_P)
-                        top_k = _ihdr("X-Top-K", DEFAULT_TOP_K)
-
-                        with torch.inference_mode():
-                            h_normed = norm(h) if norm else h
-                            logits = torch.nn.functional.linear(h_normed.float(), lm_head_weight_fp32)
-                            last_logits = logits[0, -1]
-                            nan_mask = torch.isnan(last_logits) | torch.isinf(last_logits)
-                            if nan_mask.any():
-                                last_logits = torch.where(nan_mask, torch.tensor(-1e5, device=last_logits.device), last_logits)
-                            last_logits[0] = -1e5
-                            token_id = _sample_next_token(last_logits.cpu(), temperature, top_p, top_k)
-
-                        elapsed = time.time() - t0
-                        resp_body = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed*1000)}).encode()
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Content-Length", str(len(resp_body)))
-                        self.end_headers()
-                        self.wfile.write(resp_body)
-                        return
-
-                    if mode == "embed_step":
-                        if DynamicCache is None or embed is None:
-                            err = json.dumps(
-                                {"error": "embed_step requires transformers DynamicCache and embed weights"}
-                            ).encode()
-                            self.send_response(503)
-                            self.send_header("Content-Type", "application/json")
-                            self.send_header("Content-Length", str(len(err)))
-                            self.end_headers()
-                            self.wfile.write(err)
-                            return
-                        if request_id not in kv_cache_state:
-                            err = json.dumps(
-                                {"error": "no KV for request_id; run embed (prefill) first"}
-                            ).encode()
-                            self.send_response(409)
-                            self.send_header("Content-Type", "application/json")
-                            self.send_header("Content-Length", str(len(err)))
-                            self.end_headers()
-                            self.wfile.write(err)
-                            return
-                        tid = int(req["token_id"])
-                        with torch.inference_mode():
-                            ids = torch.tensor([[tid]], device=device, dtype=torch.long)
-                            hidden = embed(ids)
-                            hidden = run_forward(hidden, request_id, False, reset_kv=False)
-                        data = hidden.cpu().half().numpy().tobytes()
-                        shape = list(hidden.shape)
-                        elapsed = time.time() - t0
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/octet-stream")
-                        self.send_header("X-Shape", json.dumps(shape))
-                        self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
-                        self.send_header("Content-Length", str(len(data)))
-                        if lm_head_weight_fp32 is not None and norm is not None:
-                            temperature = float(req.get("temperature", DEFAULT_TEMPERATURE))
-                            top_p = float(req.get("top_p", DEFAULT_TOP_P))
-                            top_k = int(req.get("top_k", DEFAULT_TOP_K))
-                            with torch.inference_mode():
-                                h_n = norm(hidden[:, -1:, :])
-                                logits = torch.nn.functional.linear(h_n.float(), lm_head_weight_fp32)
-                                ll = logits[0, -1].cpu()
-                                nan_mask = torch.isnan(ll) | torch.isinf(ll)
-                                if nan_mask.any():
-                                    ll = torch.where(nan_mask, torch.tensor(-1e5), ll)
-                                ll[0] = -1e5
-                            self.send_header("X-Next-Token", str(_sample_next_token(ll, temperature, top_p, top_k)))
-                        self.end_headers()
-                        self.wfile.write(data)
-                        return
-
-                    if mode == "clear_cache":
-                        rid = req.get("request_id", "")
-                        kv_cache_state.pop(rid, None)
-                        resp = json.dumps({"status": "ok"}).encode()
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Content-Length", str(len(resp)))
-                        self.end_headers()
-                        self.wfile.write(resp)
-                        return
-
-                # Binary request — forward/generate mode
-                raw = self.rfile.read(length)
-                import numpy as np
-                shape = json.loads(shape_str) if shape_str else [1, length // (config.hidden_size * 2), config.hidden_size]
-                arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
-                is_generate = (mode == "generate")
-
-                # Sampling params. Precedence:
-                #   per-request header  >  HYVERK_* env default  >  argmax (0.0 / 1.0 / 0)
-                # Coordinator can override per-request via X-Temperature etc.; operators
-                # who want cluster-wide non-greedy behaviour without touching Rust today
-                # set HYVERK_TEMPERATURE on the last-node box.
-                def _fhdr(name, default):
-                    v = self.headers.get(name)
-                    try: return float(v) if v is not None and v != "" else default
-                    except ValueError: return default
-                def _ihdr(name, default):
-                    v = self.headers.get(name)
-                    try: return int(v) if v is not None and v != "" else default
-                    except ValueError: return default
-                temperature = _fhdr("X-Temperature", DEFAULT_TEMPERATURE)
-                top_p       = _fhdr("X-Top-P", DEFAULT_TOP_P)
-                top_k       = _ihdr("X-Top-K", DEFAULT_TOP_K)
-
-                with torch.inference_mode():
-                    hidden = torch.from_numpy(arr.copy()).to(device)
-                    hidden = run_forward(hidden, request_id, is_generate, reset_kv=False)
-                    if is_generate and lm_head_weight_fp32 is not None:
-                        # Use the cached fp32 weight matrix; the old path called
-                        # lm_head.float() every step, which copied the full vocab×hidden
-                        # projection (~2 GB on Qwen2.5-7B) to fp32 on every token.
-                        logits = torch.nn.functional.linear(hidden.float(), lm_head_weight_fp32)
-                        last_logits = logits[0, -1]  # [vocab_size]
-
-                        # Clean NaN/Inf from logits (caused by fp16 overflow in attention)
-                        nan_mask = torch.isnan(last_logits) | torch.isinf(last_logits)
-                        if nan_mask.any():
-                            print(f"WARNING: {nan_mask.sum().item()} NaN/Inf in logits, cleaning", file=sys.stderr)
-                            last_logits = torch.where(nan_mask, torch.tensor(-1e5, device=last_logits.device), last_logits)
-
-                        # Block token 0 ("!") — Qwen2 vocab id 0 is "!" which is almost
-                        # always a numerical artifact when argmax returns 0 from degraded states
-                        last_logits[0] = -1e5
-
-                        token_id = _sample_next_token(last_logits, temperature, top_p, top_k)
-
-                if is_generate and lm_head_weight_fp32 is not None:
-                    elapsed = time.time() - t0
-                    resp = json.dumps({"token_id": token_id, "elapsed_ms": int(elapsed * 1000)}).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(resp)))
-                    self.end_headers()
-                    self.wfile.write(resp)
-                else:
+                if mode == "embed":
+                    token_ids = req["token_ids"]
+                    temperature = float(req.get("temperature", DEFAULT_TEMPERATURE))
+                    top_p = float(req.get("top_p", DEFAULT_TOP_P))
+                    top_k = int(req.get("top_k", DEFAULT_TOP_K))
+                    with torch.inference_mode():
+                        ids = torch.tensor([token_ids], device=device, dtype=torch.long)
+                        hidden = embed(ids)
+                        hidden = run_forward(hidden, request_id, False, reset_kv=True)
                     data = hidden.cpu().half().numpy().tobytes()
                     shape = list(hidden.shape)
                     elapsed = time.time() - t0
+                    hdrs = {
+                        "content-type": "application/octet-stream",
+                        "x-shape": json.dumps(shape),
+                        "x-elapsed-ms": str(int(elapsed * 1000)),
+                        "content-length": str(len(data)),
+                    }
+                    if lm_head_weight_fp32 is not None and norm is not None:
+                        with torch.inference_mode():
+                            h_n = norm(hidden[:, -1:, :])
+                            ll = torch.nn.functional.linear(h_n.float(), lm_head_weight_fp32)[0, -1].cpu()
+                            nan_mask = torch.isnan(ll) | torch.isinf(ll)
+                            if nan_mask.any():
+                                ll = torch.where(nan_mask, torch.tensor(-1e5), ll)
+                            ll[0] = -1e5
+                        hdrs["x-next-token"] = str(_sample_next_token(ll, temperature, top_p, top_k))
+                    return 200, hdrs, data
+
+                if mode == "lm_head_only":
+                    if lm_head_weight_fp32 is None:
+                        return _json_resp(503, {"error": "lm_head not available on this node"})
+                    hidden_raw = req.get("hidden")
+                    if hidden_raw is None:
+                        return _json_resp(400, {"error": "lm_head_only requires 'hidden' field"})
+                    arr = np.array(hidden_raw, dtype=np.float16).reshape(1, 1, config.hidden_size)
+                    h = torch.from_numpy(arr.copy()).to(device)
+                    temperature = _fhdr("x-temperature", DEFAULT_TEMPERATURE)
+                    top_p = _fhdr("x-top-p", DEFAULT_TOP_P)
+                    top_k = _ihdr("x-top-k", DEFAULT_TOP_K)
+                    with torch.inference_mode():
+                        h_normed = norm(h) if norm else h
+                        logits = torch.nn.functional.linear(h_normed.float(), lm_head_weight_fp32)
+                        ll = logits[0, -1]
+                        nan_mask = torch.isnan(ll) | torch.isinf(ll)
+                        if nan_mask.any():
+                            ll = torch.where(nan_mask, torch.tensor(-1e5, device=ll.device), ll)
+                        ll[0] = -1e5
+                        token_id = _sample_next_token(ll.cpu(), temperature, top_p, top_k)
+                    elapsed = time.time() - t0
+                    return _json_resp(200, {"token_id": token_id, "elapsed_ms": int(elapsed * 1000)})
+
+                if mode == "embed_step":
+                    if DynamicCache is None or embed is None:
+                        return _json_resp(503, {"error": "embed_step requires DynamicCache and embed weights"})
+                    with kv_lock:
+                        has_kv = request_id in kv_cache_state
+                    if not has_kv:
+                        return _json_resp(409, {"error": "no KV for request_id; run embed (prefill) first"})
+                    tid = int(req["token_id"])
+                    temperature = float(req.get("temperature", DEFAULT_TEMPERATURE))
+                    top_p = float(req.get("top_p", DEFAULT_TOP_P))
+                    top_k = int(req.get("top_k", DEFAULT_TOP_K))
+                    with torch.inference_mode():
+                        ids = torch.tensor([[tid]], device=device, dtype=torch.long)
+                        hidden = embed(ids)
+                        hidden = run_forward(hidden, request_id, False, reset_kv=False)
+                    data = hidden.cpu().half().numpy().tobytes()
+                    shape = list(hidden.shape)
+                    elapsed = time.time() - t0
+                    hdrs = {
+                        "content-type": "application/octet-stream",
+                        "x-shape": json.dumps(shape),
+                        "x-elapsed-ms": str(int(elapsed * 1000)),
+                        "content-length": str(len(data)),
+                    }
+                    if lm_head_weight_fp32 is not None and norm is not None:
+                        with torch.inference_mode():
+                            h_n = norm(hidden[:, -1:, :])
+                            ll = torch.nn.functional.linear(h_n.float(), lm_head_weight_fp32)[0, -1].cpu()
+                            nan_mask = torch.isnan(ll) | torch.isinf(ll)
+                            if nan_mask.any():
+                                ll = torch.where(nan_mask, torch.tensor(-1e5), ll)
+                            ll[0] = -1e5
+                        hdrs["x-next-token"] = str(_sample_next_token(ll, temperature, top_p, top_k))
+                    return 200, hdrs, data
+
+                if mode == "clear_cache":
+                    rid = req.get("request_id", "")
+                    with kv_lock:
+                        kv_cache_state.pop(rid, None)
+                    return _json_resp(200, {"status": "ok"})
+
+                return _json_resp(400, {"error": f"unknown mode: {mode}"})
+
+            # Binary path — forward / generate
+            shape = json.loads(shape_str) if shape_str else [1, max(1, len(body) // (config.hidden_size * 2)), config.hidden_size]
+            arr = np.frombuffer(body, dtype=np.float16).reshape(shape)
+            is_generate = (mode == "generate")
+            temperature = _fhdr("x-temperature", DEFAULT_TEMPERATURE)
+            top_p = _fhdr("x-top-p", DEFAULT_TOP_P)
+            top_k = _ihdr("x-top-k", DEFAULT_TOP_K)
+
+            with torch.inference_mode():
+                hidden = torch.from_numpy(arr.copy()).to(device)
+                hidden = run_forward(hidden, request_id, is_generate, reset_kv=False)
+                if is_generate and lm_head_weight_fp32 is not None:
+                    logits = torch.nn.functional.linear(hidden.float(), lm_head_weight_fp32)
+                    last_logits = logits[0, -1]
+                    nan_mask = torch.isnan(last_logits) | torch.isinf(last_logits)
+                    if nan_mask.any():
+                        print(f"WARNING: {nan_mask.sum().item()} NaN/Inf in logits, cleaning", file=sys.stderr)
+                        last_logits = torch.where(nan_mask, torch.tensor(-1e5, device=last_logits.device), last_logits)
+                    last_logits[0] = -1e5
+                    token_id = _sample_next_token(last_logits, temperature, top_p, top_k)
+
+            if is_generate and lm_head_weight_fp32 is not None:
+                elapsed = time.time() - t0
+                return _json_resp(200, {"token_id": token_id, "elapsed_ms": int(elapsed * 1000)})
+
+            data = hidden.cpu().half().numpy().tobytes()
+            shape_out = list(hidden.shape)
+            elapsed = time.time() - t0
+            hdrs = {
+                "content-type": "application/octet-stream",
+                "x-shape": json.dumps(shape_out),
+                "x-elapsed-ms": str(int(elapsed * 1000)),
+                "content-length": str(len(data)),
+            }
+            return 200, hdrs, data
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+            return _json_resp(500, {"error": str(e)})
+
+    # ------------------------------------------------------------------
+    # Starlette async routes
+    # ------------------------------------------------------------------
+    try:
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+        from starlette.requests import Request
+        from starlette.responses import Response, JSONResponse
+        import uvicorn
+        _HAS_UVICORN = True
+    except ImportError:
+        _HAS_UVICORN = False
+
+    if not _HAS_UVICORN:
+        # Graceful fallback to stdlib ThreadingHTTPServer when uvicorn is absent.
+        from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+        import threading as _threading
+        _model_lock = _threading.Lock()
+
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *a): pass
+            def do_GET(self):
+                if self.path in ("/health", "/healthz", "/"):
+                    with kv_lock:
+                        entries = []
+                        for rid, v in list(kv_cache_state.items()):
+                            try: seen = v["cache"].get_seq_length()
+                            except Exception: seen = 0
+                            entries.append({"request_id": rid, "kv_tokens": int(seen)})
+                    body = json.dumps({"status": "ready", "device": str(device),
+                                       "layers": f"{args.layer_start}-{args.layer_end}",
+                                       "uptime_s": int(time.time() - started_at),
+                                       "kv_entries": entries}).encode()
                     self.send_response(200)
-                    self.send_header("Content-Type", "application/octet-stream")
-                    self.send_header("X-Shape", json.dumps(shape))
-                    self.send_header("X-Elapsed-Ms", str(int(elapsed * 1000)))
-                    self.send_header("Content-Length", str(len(data)))
-                    self.end_headers()
-                    self.wfile.write(data)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body)
+                else:
+                    body = json.dumps({"error": "not found"}).encode()
+                    self.send_response(404); self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw_headers = {k.lower(): v for k, v in self.headers.items()}
+                body = self.rfile.read(length)
+                with _model_lock:
+                    code, hdrs, resp_body = handle_inference_sync(body, raw_headers)
+                self.send_response(code)
+                for k, v in hdrs.items(): self.send_header(k, v)
+                self.end_headers(); self.wfile.write(resp_body)
 
-            except Exception as e:
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-                sys.stderr.flush()
-                err = json.dumps({"error": str(e)}).encode()
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(err)))
-                self.end_headers()
-                self.wfile.write(err)
-            finally:
-                model_lock.release()
+        srv = ThreadingHTTPServer((args.host, args.port), _Handler)
+        srv.daemon_threads = True
+        print(json.dumps({"status": "ready", "port": args.port, "device": str(device),
+                          "layers": f"{args.layer_start}-{args.layer_end}",
+                          "kv_incremental": DynamicCache is not None}))
+        sys.stdout.flush()
+        print(f"Serving (stdlib fallback) on http://{args.host}:{args.port}", file=sys.stderr)
+        srv.serve_forever()
+        return
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.daemon_threads = True
-    print(json.dumps({
-        "status": "ready",
-        "port": args.port,
-        "device": str(device),
-        "layers": f"{args.layer_start}-{args.layer_end}",
-        "kv_incremental": DynamicCache is not None,
-    }))
-    sys.stdout.flush()
+    # Single-worker executor — serialises all GPU operations while letting the
+    # asyncio event loop handle I/O for health checks and concurrent connections
+    # without blocking.
+    gpu_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpu")
+
+    async def _health(request):
+        with kv_lock:
+            entries = []
+            for rid, v in list(kv_cache_state.items()):
+                try: seen = v["cache"].get_seq_length()
+                except Exception: seen = 0
+                entries.append({"request_id": rid, "kv_tokens": int(seen)})
+        return JSONResponse({
+            "status": "ready",
+            "device": str(device),
+            "layers": f"{args.layer_start}-{args.layer_end}",
+            "port": args.port,
+            "tcp_port": args.port + 1,
+            "kv_incremental": DynamicCache is not None,
+            "active_requests": len(entries),
+            "max_cache_entries": MAX_CACHE_ENTRIES,
+            "uptime_s": int(time.time() - started_at),
+            "kv_entries": entries,
+        })
+
+    async def _inference(request: Request):
+        body = await request.body()
+        raw_headers = dict(request.headers)
+        loop = asyncio.get_event_loop()
+        code, hdrs, resp_body = await loop.run_in_executor(
+            gpu_executor, handle_inference_sync, body, raw_headers
+        )
+        return Response(resp_body, status_code=code, headers=hdrs)
+
+    # ------------------------------------------------------------------
+    # TCP server — port args.port+1
+    # Frame format (request and response):
+    #   [4B LE: total_payload_len][4B LE: json_header_len][json][binary]
+    # json fields (request):  mode, request_id, shape, temperature, top_p, top_k
+    # json fields (response): status, elapsed_ms, shape?, next_token?
+    # ------------------------------------------------------------------
+
+    async def _handle_tcp_client(reader, writer):
+        peer = writer.get_extra_info("peername")
+        try:
+            while True:
+                try:
+                    hdr = await asyncio.wait_for(reader.readexactly(8), timeout=60.0)
+                except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionResetError):
+                    break
+                total_len, json_len = struct.unpack("<II", hdr)
+                bin_len = total_len - json_len
+                json_bytes = await reader.readexactly(json_len)
+                bin_data = await reader.readexactly(bin_len) if bin_len > 0 else b""
+                try:
+                    meta = json.loads(json_bytes)
+                except Exception:
+                    break
+                mode = meta.get("mode", "forward")
+                synthetic_headers = {
+                    "x-mode": mode,
+                    "x-request-id": meta.get("request_id", ""),
+                    "x-shape": json.dumps(meta.get("shape", [])),
+                    "x-temperature": str(meta.get("temperature", DEFAULT_TEMPERATURE)),
+                    "x-top-p": str(meta.get("top_p", DEFAULT_TOP_P)),
+                    "x-top-k": str(meta.get("top_k", DEFAULT_TOP_K)),
+                }
+                if bin_data:
+                    synthetic_headers["content-type"] = "application/octet-stream"
+                    body = bin_data
+                else:
+                    synthetic_headers["content-type"] = "application/json"
+                    body = json_bytes  # re-use JSON as body for embed/embed_step
+                loop = asyncio.get_event_loop()
+                code, resp_hdrs, resp_body = await loop.run_in_executor(
+                    gpu_executor, handle_inference_sync, body, synthetic_headers
+                )
+                resp_meta: dict = {"status": code, "elapsed_ms": int(resp_hdrs.get("x-elapsed-ms", 0))}
+                if "x-shape" in resp_hdrs:
+                    resp_meta["shape"] = json.loads(resp_hdrs["x-shape"])
+                if "x-next-token" in resp_hdrs:
+                    resp_meta["next_token"] = int(resp_hdrs["x-next-token"])
+                if code >= 400:
+                    try: resp_meta["error"] = json.loads(resp_body).get("error", "")
+                    except Exception: pass
+                    resp_body = b""
+                resp_json = json.dumps(resp_meta).encode()
+                frame_payload = len(resp_json) + len(resp_body)
+                frame = struct.pack("<II", frame_payload, len(resp_json)) + resp_json + resp_body
+                writer.write(frame)
+                await writer.drain()
+        except Exception as e:
+            print(f"TCP client error {peer}: {e}", file=sys.stderr)
+        finally:
+            try: writer.close()
+            except Exception: pass
+
+    @asynccontextmanager
+    async def _lifespan(app):
+        tcp_srv = await asyncio.start_server(_handle_tcp_client, args.host, args.port + 1)
+        print(f"TCP inference server on tcp://{args.host}:{args.port + 1}", file=sys.stderr)
+        # Ready signal — emitted after both HTTP and TCP listeners are bound.
+        # Rust ws_worker reads exactly one line from stdout before proceeding.
+        print(json.dumps({
+            "status": "ready",
+            "port": args.port,
+            "tcp_port": args.port + 1,
+            "device": str(device),
+            "layers": f"{args.layer_start}-{args.layer_end}",
+            "kv_incremental": DynamicCache is not None,
+        }))
+        sys.stdout.flush()
+        async with tcp_srv:
+            yield
+        gpu_executor.shutdown(wait=False)
+
+    async def _root(request: Request):
+        if request.method == "GET":
+            return await _health(request)
+        return await _inference(request)
+
+    app = Starlette(
+        lifespan=_lifespan,
+        routes=[
+            Route("/health", _health),
+            Route("/healthz", _health),
+            Route("/", endpoint=_root, methods=["GET", "POST"]),
+        ],
+    )
     print(f"Serving on http://{args.host}:{args.port}", file=sys.stderr)
-    server.serve_forever()
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
 
 def embed_tokens(args):
     """First node: embed token IDs, forward through layers, save hidden states"""
