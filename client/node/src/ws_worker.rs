@@ -442,6 +442,87 @@ async fn handle_coordinator_message(
     }
 }
 
+// ---------------------------------------------------------------------------
+// TCP inference transport
+// Frame (both directions): [4B LE total_payload][4B LE json_len][json][binary]
+// ---------------------------------------------------------------------------
+
+struct TcpForwardResponse {
+    shape: Vec<usize>,
+    next_token: Option<u32>,
+    hidden_data: Vec<u8>,
+}
+
+async fn forward_via_tcp(
+    hidden_data: &[u8],
+    mode: &str,
+    request_id: &str,
+    seq_len: usize,
+    hidden_size: usize,
+    sampling: &SamplingParams,
+) -> Result<TcpForwardResponse, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let addr = "127.0.0.1:18101";
+    let mut stream = tokio::time::timeout(
+        Duration::from_millis(200),
+        TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| format!("TCP connect to {addr} timed out"))?
+    .map_err(|e| format!("TCP connect to {addr} failed: {e}"))?;
+
+    // Build JSON metadata header
+    let mut meta = serde_json::json!({
+        "mode": mode,
+        "request_id": request_id,
+        "shape": [1u32, seq_len as u32, hidden_size as u32],
+    });
+    if let Some(t) = sampling.temperature { meta["temperature"] = t.into(); }
+    if let Some(p) = sampling.top_p      { meta["top_p"]       = p.into(); }
+    if let Some(k) = sampling.top_k      { meta["top_k"]       = k.into(); }
+    let json_bytes = serde_json::to_vec(&meta)?;
+
+    // Write request frame
+    let total_payload = json_bytes.len() + hidden_data.len();
+    let mut frame = Vec::with_capacity(8 + total_payload);
+    frame.extend_from_slice(&(total_payload as u32).to_le_bytes());
+    frame.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&json_bytes);
+    frame.extend_from_slice(hidden_data);
+    stream.write_all(&frame).await?;
+
+    // Read response frame header
+    let mut hdr = [0u8; 8];
+    stream.read_exact(&mut hdr).await?;
+    let resp_total  = u32::from_le_bytes(hdr[..4].try_into().unwrap()) as usize;
+    let resp_jlen   = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
+    let resp_binlen = resp_total.saturating_sub(resp_jlen);
+
+    let mut resp_json_buf = vec![0u8; resp_jlen];
+    stream.read_exact(&mut resp_json_buf).await?;
+    let mut resp_bin = vec![0u8; resp_binlen];
+    if resp_binlen > 0 {
+        stream.read_exact(&mut resp_bin).await?;
+    }
+
+    let resp: serde_json::Value = serde_json::from_slice(&resp_json_buf)?;
+    let status = resp["status"].as_u64().unwrap_or(200) as u16;
+    if status >= 400 {
+        let err = resp["error"].as_str().unwrap_or("unknown error");
+        return Err(format!("inference server error {status}: {err}").into());
+    }
+
+    let shape = resp["shape"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+        .unwrap_or_default();
+    let next_token = resp["next_token"].as_u64().map(|t| t as u32);
+
+    Ok(TcpForwardResponse { shape, next_token, hidden_data: resp_bin })
+}
+
 async fn handle_binary_forward(
     data: Vec<u8>,
     model_dir: &str,
@@ -460,17 +541,8 @@ async fn handle_binary_forward(
     let (layer_start, layer_end) = parse_layer_range(model_dir);
     let is_last = layer_end >= 28;
     let mode = if is_last { "generate" } else { "forward" };
-
-    info!(request_id = %request_id, mode, layers = format!("{layer_start}-{layer_end}"), "Running forward pass via inference server");
-
-    // Call persistent inference server via HTTP
-    let port = 18100u16;
-    let url = format!("http://127.0.0.1:{port}");
-    let client = local_inference_http_client();
-
-    // Send hidden states as raw binary with request ID for KV cache
     let hidden_size = 3584usize; // Qwen2.5-7B hidden size
-    let seq_len = hidden_data.len() / (hidden_size * 2); // f16 = 2 bytes
+    let seq_len = hidden_data.len() / (hidden_size * 2); // fp16 = 2 bytes
 
     let sampling = sampling_by_request
         .lock()
@@ -478,65 +550,86 @@ async fn handle_binary_forward(
         .and_then(|g| g.get(&request_id).cloned())
         .unwrap_or_default();
 
+    info!(request_id = %request_id, mode, layers = format!("{layer_start}-{layer_end}"), "Running forward pass");
+
+    // Try TCP first (lower framing overhead); fall back to HTTP on connect failure.
+    match forward_via_tcp(&hidden_data, mode, &request_id, seq_len, hidden_size, &sampling).await {
+        Ok(tcp_resp) => {
+            if is_last {
+                let token_id = match tcp_resp.next_token {
+                    Some(t) => t,
+                    None => {
+                        error!(request_id = %request_id, "TCP generate: missing next_token in response");
+                        return None;
+                    }
+                };
+                let is_eos = token_id == 151643 || token_id == 151644 || token_id == 151645;
+                info!(request_id = %request_id, token_id, eos = is_eos, transport = "tcp", "Token generated");
+                Some(WsResponse::Text(ClientMessage::TokenGenerated { request_id, token_id, is_eos }))
+            } else {
+                info!(request_id = %request_id, hidden_size = tcp_resp.hidden_data.len(), transport = "tcp", "Forward complete");
+                let msg = ClientMessage::ForwardResult { request_id: request_id.clone(), hidden_states: vec![], shape: tcp_resp.shape };
+                let mut payload = vec![0u8; 36];
+                payload[..request_id.len().min(36)].copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
+                payload.extend_from_slice(&tcp_resp.hidden_data);
+                Some(WsResponse::TextAndBinary(msg, payload))
+            }
+        }
+        Err(tcp_err) => {
+            // TCP unavailable (old Python server or port not yet open) — fall back to HTTP.
+            warn!(request_id = %request_id, "TCP forward failed ({tcp_err}), falling back to HTTP");
+            handle_binary_forward_http(&hidden_data, mode, &request_id, seq_len, hidden_size, is_last, &sampling).await
+        }
+    }
+}
+
+async fn handle_binary_forward_http(
+    hidden_data: &[u8],
+    mode: &str,
+    request_id: &str,
+    seq_len: usize,
+    hidden_size: usize,
+    is_last: bool,
+    sampling: &SamplingParams,
+) -> Option<WsResponse> {
+    let url = "http://127.0.0.1:18100";
+    let client = local_inference_http_client();
+
     let post = client
-        .post(&url)
+        .post(url)
         .header("X-Mode", mode)
         .header("X-Shape", format!("[1,{seq_len},{hidden_size}]"))
-        .header("X-Request-Id", &request_id)
+        .header("X-Request-Id", request_id)
         .header("Content-Type", "application/octet-stream");
+    let post = if is_last { apply_sampling_headers(post, sampling) } else { post };
 
-    let post = if mode == "generate" {
-        apply_sampling_headers(post, &sampling)
-    } else {
-        post
-    };
-
-    let resp = match post.body(hidden_data).send().await {
+    let resp = match post.body(hidden_data.to_vec()).send().await {
         Ok(r) => r,
-        Err(e) => {
-            error!("Inference server unreachable: {e}");
-            return None;
-        }
+        Err(e) => { error!("Inference server unreachable: {e}"); return None; }
     };
 
     if is_last {
-        // Generate mode: response is JSON with token_id
         let result: serde_json::Value = match resp.json().await {
             Ok(r) => r,
             Err(e) => { error!("Bad generate response: {e}"); return None; }
         };
-        if let Some(err) = result.get("error") {
-            error!("Generate error: {err}");
-            return None;
-        }
+        if let Some(err) = result.get("error") { error!("Generate error: {err}"); return None; }
         let token_id = result["token_id"].as_u64()? as u32;
         let is_eos = token_id == 151643 || token_id == 151644 || token_id == 151645;
-        info!(request_id = %request_id, token_id, eos = is_eos, "Token generated");
-        Some(WsResponse::Text(ClientMessage::TokenGenerated {
-            request_id,
-            token_id,
-            is_eos,
-        }))
+        info!(request_id = %request_id, token_id, eos = is_eos, transport = "http", "Token generated");
+        Some(WsResponse::Text(ClientMessage::TokenGenerated { request_id: request_id.to_string(), token_id, is_eos }))
     } else {
-        // Forward mode: response is raw hidden states
         let shape_str = resp.headers().get("X-Shape")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("[]").to_string();
+            .and_then(|v| v.to_str().ok()).unwrap_or("[]").to_string();
         let shape: Vec<usize> = serde_json::from_str(&shape_str).unwrap_or_default();
         let hidden_out = match resp.bytes().await {
             Ok(b) => b.to_vec(),
             Err(e) => { error!("Bad forward response: {e}"); return None; }
         };
-
-        info!(request_id = %request_id, hidden_size = hidden_out.len(), "Forward complete");
-        let msg = ClientMessage::ForwardResult {
-            request_id: request_id.clone(),
-            hidden_states: vec![],
-            shape,
-        };
+        info!(request_id = %request_id, hidden_size = hidden_out.len(), transport = "http", "Forward complete");
+        let msg = ClientMessage::ForwardResult { request_id: request_id.to_string(), hidden_states: vec![], shape };
         let mut payload = vec![0u8; 36];
-        payload[..request_id.len().min(36)]
-            .copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
+        payload[..request_id.len().min(36)].copy_from_slice(&request_id.as_bytes()[..request_id.len().min(36)]);
         payload.extend_from_slice(&hidden_out);
         Some(WsResponse::TextAndBinary(msg, payload))
     }
