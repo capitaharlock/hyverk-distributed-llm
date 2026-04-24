@@ -85,8 +85,10 @@ impl RotaryEmbedding {
     /// Apply RoPE to [batch, heads, seq, head_dim] tensors.
     fn apply(&self, x: &Tensor, offset: usize) -> Result<Tensor> {
         let (b, h, s, d) = x.dims4()?;
-        let cos = self.cos.i(offset..offset + s)?.reshape((1, 1, s, d))?;
-        let sin = self.sin.i(offset..offset + s)?.reshape((1, 1, s, d))?;
+        let dtype = x.dtype();
+        // cos/sin are stored as F32; cast to input dtype to avoid Metal dtype mismatch
+        let cos = self.cos.i(offset..offset + s)?.reshape((1, 1, s, d))?.to_dtype(dtype)?;
+        let sin = self.sin.i(offset..offset + s)?.reshape((1, 1, s, d))?.to_dtype(dtype)?;
         let cos = cos.broadcast_as((b, h, s, d))?;
         let sin = sin.broadcast_as((b, h, s, d))?;
         let half = d / 2;
@@ -193,7 +195,9 @@ impl Mlp {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = candle_nn::ops::silu(&self.gate_proj.forward(x)?)?;
+        let orig_dtype = x.dtype();
+        // silu on F16 may return F32 on Metal — cast back before multiply
+        let gate = candle_nn::ops::silu(&self.gate_proj.forward(x)?)?.to_dtype(orig_dtype)?;
         let up = self.up_proj.forward(x)?;
         Ok(self.down_proj.forward(&(gate * up)?)?)
     }
