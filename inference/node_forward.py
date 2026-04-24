@@ -145,16 +145,36 @@ def main():
     elif args.mode == "generate":
         generate_token(args)
 
+def _install_https_opener():
+    """Use certifi CA bundle when present (fixes macOS python.org SSL verify failures)."""
+    import ssl
+    import urllib.request
+
+    try:
+        import certifi
+
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    urllib.request.install_opener(opener)
+
+
 def download_layers(args):
     """Download only the safetensors shards needed for our layers"""
     import urllib.request
+
+    _install_https_opener()
     os.makedirs(args.model_dir, exist_ok=True)
 
     # Get model index from coordinator
     url = f"{args.coordinator}/api/v1/model/config"
     resp = json.loads(urllib.request.urlopen(url, timeout=30).read())
     if not resp.get("available"):
-        print(json.dumps({"error": "Model not available on coordinator"})); return
+        err = "Model not available on coordinator (publish shards / set available on Fly)"
+        print(err, file=sys.stderr)
+        print(json.dumps({"error": err}))
+        sys.exit(1)
 
     index = resp["index"]
     config = resp["config"]

@@ -891,11 +891,20 @@ async fn download_layers(
         info!(target: "download", "{}", line);
     }
 
+    let stdout = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() {
-        return Err(format!("Layer download failed: {stderr}").into());
+        let detail = if stderr.trim().is_empty() {
+            format!(
+                "exit={} stdout={}",
+                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+                stdout.trim()
+            )
+        } else {
+            stderr.into_owned()
+        };
+        return Err(format!("Layer download failed: {detail}").into());
     }
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
     info!("Layer download result: {}", stdout.trim());
     Ok(())
 }
