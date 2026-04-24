@@ -868,6 +868,21 @@ async fn download_layers(
     layer_start: usize,
     layer_end: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Skip download if safetensors files already present in the target directory.
+    // This lets operators pre-populate ~/.hyverk/qwen2.5-7b/inference_layers_X_Y
+    // (or symlink it) without relying on coordinator-side model hosting.
+    if let Ok(mut entries) = std::fs::read_dir(model_dir) {
+        let has_weights = entries.any(|e| {
+            e.ok().and_then(|e| e.file_name().into_string().ok())
+                .map(|n| n.ends_with(".safetensors") || n == "config.json")
+                .unwrap_or(false)
+        });
+        if has_weights {
+            info!("Layer weights already present at {model_dir}, skipping download");
+            return Ok(());
+        }
+    }
+
     let script = find_script("inference/node_forward.py");
     let python = find_python();
 
