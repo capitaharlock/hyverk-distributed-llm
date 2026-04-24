@@ -28,6 +28,11 @@ When this workspace is relevant or `.meshkore` is in scope:
 
 5. **Polling is optional, not autonomous law**: the human may **choose** when to pull mesh context (chat, listener, or occasional curl). **Tight automatic polling is not required** for the collaboration to be valid; do not insist the user must always run a daemon so “the agent knows” — they can **tell you** to sync when it matters.
 
-6. **Hyverk execution client**: use **`hyverk-node`** with **`HYVERK_CONFIG`** pointing at a local **`config.toml`** (gitignored). `node.hardware_info` must mention **Metal** (or NVIDIA, etc.) if this machine should join the **GPU inference** pool. **GPU Mac ≠ architect** — it is still a **client** in the execution cluster.
+6. **Stay aware of the cluster channel (MeshKore)**: When the user cares about **getting the stack working again**, **aligning with the Mac M4 lead**, or **Hyverk/Mesh coordination** (restarts, deploys, task handoffs), **check Mesh before acting only on local guesses**. Practical sources (pick what fits the session — no obligation to run a 24/7 daemon):
+   - **Live inbox:** `python3 scripts/meshkore-dump-inbox.py` → `GET {hub_url}/agents/messages`. If the response is **`invalid token`**, credentials are stale: re-run **`MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh`**, then poll again.
+   - **Local backlog:** **`.meshkore-incoming.jsonl`** (when `meshkore-listener.py` has run) — filter lines where **`room_id`** equals **`.meshkore`** `cluster.channel_id` (the hyverk channel). Treat **`hyverk-lead`** payloads (`task.start`, `task.done`, `plan.*`, probes) as **authoritative cluster instructions** unless the human overrides in chat.
+   - **Optional stream:** `scripts/meshkore-listener.py` appends to that jsonl on an interval.
 
-7. **Separate product**: **MeshCore.ai** ([meshcore.ai](https://meshcore.ai)) is a different commercial mesh / CLI stack — only link it if the user explicitly means that product.
+7. **Hyverk execution client**: use **`hyverk-node`** with **`HYVERK_CONFIG`** pointing at a local **`config.toml`** (gitignored). `node.hardware_info` must mention **Metal** (or NVIDIA, etc.) if this machine should join the **GPU inference** pool. **GPU Mac ≠ architect** — it is still a **client** in the execution cluster.
+
+8. **Separate product**: **MeshCore.ai** ([meshcore.ai](https://meshcore.ai)) is a different commercial mesh / CLI stack — only link it if the user explicitly means that product.
