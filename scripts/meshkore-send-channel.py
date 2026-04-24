@@ -10,12 +10,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
-from meshkore_resolve import credentials_path
-
 ROOT = Path(__file__).resolve().parent.parent
+LOCAL = ROOT / ".meshkore.local"
 
 
 def main() -> int:
@@ -33,18 +29,17 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    local = credentials_path(ROOT)
-    if local is None or not local.exists():
-        print("Missing .mechcore.local or .meshkore.local — run scripts/meshkore-join.sh", file=sys.stderr)
+    if not LOCAL.exists():
+        print("Missing .meshkore.local — run scripts/meshkore-join.sh", file=sys.stderr)
         return 1
 
-    raw = json.loads(local.read_text())
+    raw = json.loads(LOCAL.read_text())
     hub = str(raw.get("hub_url") or "").rstrip("/")
     token = raw.get("token") or ""
     channel_id = raw.get("channel_id") or ""
     agent_id = raw.get("agent_id") or "unknown"
     if not hub or not token or not channel_id:
-        print("credentials file missing hub_url, token, or channel_id", file=sys.stderr)
+        print(".meshkore.local missing hub_url, token, or channel_id", file=sys.stderr)
         return 1
 
     body: dict = {"payload": {"from": agent_id}}

@@ -5,12 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
-from meshkore_resolve import credentials_path
-
 ROOT = Path(__file__).resolve().parent.parent
+LOCAL = ROOT / ".meshkore.local"
 
 
 def fetch(hub: str, token: str) -> dict:
@@ -33,11 +29,10 @@ def fetch(hub: str, token: str) -> dict:
 
 
 def main() -> None:
-    local = credentials_path(ROOT)
-    if local is None or not local.exists():
-        print("Missing .mechcore.local or .meshkore.local — run scripts/meshkore-join.sh", file=sys.stderr)
+    if not LOCAL.exists():
+        print("Missing .meshkore.local", file=sys.stderr)
         sys.exit(1)
-    c = json.loads(local.read_text())
+    c = json.loads(LOCAL.read_text())
     hub = c["hub_url"]
     for label, tok in (
         ("primary", c["token"]),
