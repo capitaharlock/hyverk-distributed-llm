@@ -41,7 +41,17 @@ def main() -> None:
         if not tok:
             continue
         print(f"--- {label} ({c.get('agent_id', '?')}) ---")
-        print(json.dumps(fetch(hub, tok), indent=2))
+        data = fetch(hub, tok)
+        print(json.dumps(data, indent=2))
+        msgs = data.get("messages") if isinstance(data, dict) else None
+        if isinstance(msgs, list) and len(msgs) == 0 and not data.get("error"):
+            print(
+                "(empty) Hub returned no queued messages — they may have been consumed by a "
+                "previous poll, or leader DMs went to another agent_id. "
+                "Compare your agent_id above with whom hyverk-lead addresses; "
+                "run meshkore-listener.py so nothing is missed between polls.",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
