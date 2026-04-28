@@ -80,6 +80,8 @@ This is **separate** from the Hyverk Fly coordinator: same repo, **`.meshkore`**
 
 ```bash
 MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh
+# If the lead DMs a fixed agent_id, match it:
+# MESHKORE_AGENT_ID=hyverk-cursor-architect-435d95 bash scripts/meshkore-join.sh
 python3 scripts/meshkore-dump-inbox.py
 # optional: python3 scripts/meshkore-listener.py
 ```

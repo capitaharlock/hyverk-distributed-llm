@@ -3,7 +3,11 @@
 Permanent MeshKore inbox listener for Hyverk.
 
 - Polls GET {hub_url}/agents/messages every **5 seconds** for the **primary** token in
-  `.meshkore.local` only (you + leader on the channel — no second synthetic agent).
+  `.meshkore.local` only. That endpoint is the **unified inbox**: **channel traffic the hub
+  surfaces to you** plus **direct messages** addressed to **your** `agent_id`. If the Mac M4
+  lead (`hyverk-lead`) DMs a *different* agent_id (e.g. an old `hyverk-cursor-architect-*`),
+  this identity will not see those DMs — use `MESHKORE_AGENT_ID=…` on join to match the id
+  the lead uses, or ask them to post to the **cluster channel** (see `.meshkore` → `cluster.channel_id`).
 - Optional second token: set env `MESHKORE_POLL_TEAMMATE=1` to also poll `teammate`.
 - Appends each new message as one JSON line to .meshkore-incoming.jsonl (deduped).
 

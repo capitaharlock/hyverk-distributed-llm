@@ -12,7 +12,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-AGENT_ID="${MESHKORE_AGENT_ID:-hyverk-contrib-$(openssl rand -hex 4)}"
+# Stable default per machine (no "cursor" / "architect" in the id — avoids confusing the cluster UI).
+# Override if taken: MESHKORE_AGENT_ID=you@machine bash scripts/meshkore-join.sh
+_HOST="$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-20)"
+AGENT_ID="${MESHKORE_AGENT_ID:-hyverk-contributor-${_HOST:-dev}}"
 HUB_URL="${MESHKORE_HUB_URL:-https://meshkore-relay.fly.dev}"
 HUB_URL="${HUB_URL%/}"
 

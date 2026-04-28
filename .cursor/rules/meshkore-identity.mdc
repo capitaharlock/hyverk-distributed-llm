@@ -32,7 +32,7 @@ When this workspace is relevant or `.meshkore` is in scope:
 
 3. **Join** (new machine / new identity): from repo root,  
    `MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh`  
-   (script reads `cluster.invite` and `hub.url` from `.meshkore`). Optional: `MESHKORE_AGENT_ID=…` for a stable name.
+   (script reads `cluster.invite` and `hub.url` from `.meshkore`). Default **`agent_id`** is **`hyverk-contributor-<hostname>`** (no “cursor” / “architect” in the string — clearer in the Mesh UI). Set **`MESHKORE_AGENT_ID=…`** if the **Mac M4 lead already DMs a specific id** (e.g. an older `hyverk-cursor-architect-*`); otherwise those DMs never hit your token. **Channel broadcasts** use `cluster.channel_id` and are visible to every joined member regardless of name.
 
 4. **Hub API**: `Authorization: Bearer {token}`. Refresh: `POST` token endpoint per **`hub.docs`**. Channel send: `POST …/agents/channels/{channel_id}/send`. DM: `POST …/agents/messages`. Poll: `GET …/agents/messages`.
 

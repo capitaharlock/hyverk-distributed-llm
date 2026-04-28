@@ -734,8 +734,10 @@ async fn serve_model_shard(
     }
 }
 
-/// Serve model config (tells client which shards contain which layers)
-async fn serve_model_config() -> impl IntoResponse {
+/// Read and validate the on-disk model state at `/data/model`.
+/// Returned tuple: (index_val, config_val, available). When `available` is false
+/// the JSON values may still be partial (Null) — callers must not trust them.
+pub async fn read_coordinator_model_state() -> (serde_json::Value, serde_json::Value, bool) {
     let index_path = "/data/model/model.safetensors.index.json";
     let config_path = "/data/model/config.json";
 
@@ -756,7 +758,21 @@ async fn serve_model_config() -> impl IntoResponse {
         .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|i| i as u64)))
         .is_some();
 
-    if !(index_ok && config_ok) {
+    (index_val, config_val, index_ok && config_ok)
+}
+
+/// Cheap availability check used to gate work assignments before the coordinator
+/// has a model on disk. Same predicate as `read_coordinator_model_state`.
+pub async fn coordinator_model_available() -> bool {
+    let (_, _, ok) = read_coordinator_model_state().await;
+    ok
+}
+
+/// Serve model config (tells client which shards contain which layers)
+async fn serve_model_config() -> impl IntoResponse {
+    let (index_val, config_val, available) = read_coordinator_model_state().await;
+
+    if !available {
         return Json(serde_json::json!({
             "available": false,
             "config": null,

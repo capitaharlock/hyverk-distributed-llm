@@ -305,18 +305,29 @@ async fn handle_client_message(
                 .unwrap_or_else(|| "none".to_string());
             info!(node_id, name = %node_name, gpu = has_gpu, ram = ram_mb, layers = %layers_info, "WS node registered");
 
-            // GPU node registered: recalculate and broadcast layer assignments to all GPU nodes
+            // GPU node registered: recalculate and broadcast layer assignments to all GPU nodes.
+            // Skip the broadcast entirely if the coordinator has no model on disk — otherwise
+            // every GPU node enters a download retry loop and reports "error", because
+            // GET /api/v1/model/config returns available=false and the shard download 404s.
             if has_gpu {
-                let nodes = state.nodes.read().await;
-                let mut gpu_nodes: Vec<&WsNode> = nodes.values().filter(|n| n.has_gpu).collect();
-                gpu_nodes.sort_by_key(|n| &n.node_name);
-                let assignments = assign_gpu_layers(&gpu_nodes);
-                for (nid, start, end) in &assignments {
-                    if let Some(n) = nodes.get(nid.as_str()) {
-                        let msg = CoordinatorMessage::LayerAssignment { layer_start: *start, layer_end: *end };
-                        let json = serde_json::to_string(&msg).unwrap_or_default();
-                        let _ = n.tx.send(Message::Text(json.into()));
-                        info!(node_id = %nid, name = %n.node_name, layers = format!("{start}-{end}"), "Sent layer assignment");
+                if !crate::http_api::coordinator_model_available().await {
+                    info!(
+                        node_id = %node_id,
+                        name = %node_name,
+                        "Skipping layer assignment: coordinator has no model in /data/model — node will idle until model is populated"
+                    );
+                } else {
+                    let nodes = state.nodes.read().await;
+                    let mut gpu_nodes: Vec<&WsNode> = nodes.values().filter(|n| n.has_gpu).collect();
+                    gpu_nodes.sort_by_key(|n| &n.node_name);
+                    let assignments = assign_gpu_layers(&gpu_nodes);
+                    for (nid, start, end) in &assignments {
+                        if let Some(n) = nodes.get(nid.as_str()) {
+                            let msg = CoordinatorMessage::LayerAssignment { layer_start: *start, layer_end: *end };
+                            let json = serde_json::to_string(&msg).unwrap_or_default();
+                            let _ = n.tx.send(Message::Text(json.into()));
+                            info!(node_id = %nid, name = %n.node_name, layers = format!("{start}-{end}"), "Sent layer assignment");
+                        }
                     }
                 }
             }
