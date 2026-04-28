@@ -96,6 +96,49 @@ fn default_models_dir() -> PathBuf {
         .join("models")
 }
 
+/// Return a stable node identity for this machine.
+///
+/// Reads `~/.hyverk/node_id` if it exists; otherwise derives one from the
+/// OS hostname, sanitises it, writes it to that file, and returns it.
+/// The config.toml `node.name` field is ignored for identity purposes —
+/// this prevents duplicate registrations when operators run multiple sessions
+/// or change their config name.
+pub fn stable_node_id() -> String {
+    let id_path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".hyverk")
+        .join("node_id");
+
+    if let Ok(contents) = std::fs::read_to_string(&id_path) {
+        let id = contents.trim().to_string();
+        if !id.is_empty() {
+            return id;
+        }
+    }
+
+    // Derive from hostname: lowercase, non-alphanumeric → '-', collapse runs, strip edges.
+    let raw = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "node".to_string());
+    let mut id: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    // Collapse consecutive dashes and trim them
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    let id = id.trim_matches('-').to_string();
+    let id = if id.is_empty() { "node".to_string() } else { id };
+
+    if let Some(parent) = id_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&id_path, &id);
+    id
+}
+
 /// Expand ~ to home directory in paths.
 fn expand_tilde(path: &PathBuf) -> PathBuf {
     let s = path.to_string_lossy();
@@ -115,6 +158,10 @@ pub fn load_config(path: &str) -> Result<HyverkConfig, crate::error::HyverkError
 
     // Expand tilde in paths
     config.node.models_dir = expand_tilde(&config.node.models_dir);
+
+    // Always override node name with the stable machine ID (~/.hyverk/node_id).
+    // Prevents duplicate registrations when config.toml name changes across sessions.
+    config.node.name = stable_node_id();
 
     Ok(config)
 }

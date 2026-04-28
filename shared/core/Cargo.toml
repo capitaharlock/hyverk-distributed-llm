@@ -10,3 +10,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tonic = { workspace = true }
 dirs = "6"
+hostname = "0.4"
