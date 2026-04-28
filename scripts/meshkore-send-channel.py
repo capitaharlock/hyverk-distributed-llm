@@ -10,8 +10,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-LOCAL = ROOT / ".meshkore.local"
+sys.path.insert(0, str(Path(__file__).parent))
+from _meshkore_local import load
 
 
 def main() -> int:
@@ -29,15 +29,11 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    if not LOCAL.exists():
-        print("Missing .meshkore.local — run scripts/meshkore-join.sh", file=sys.stderr)
-        return 1
-
-    raw = json.loads(LOCAL.read_text())
-    hub = str(raw.get("hub_url") or "").rstrip("/")
-    token = raw.get("token") or ""
-    channel_id = raw.get("channel_id") or ""
-    agent_id = raw.get("agent_id") or "unknown"
+    c = load(auto_refresh=True)
+    hub = c["hub_url"]
+    token = c["token"]
+    channel_id = c["channel_id"]
+    agent_id = c["agent_id"]
     if not hub or not token or not channel_id:
         print(".meshkore.local missing hub_url, token, or channel_id", file=sys.stderr)
         return 1

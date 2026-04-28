@@ -1,47 +1,36 @@
 #!/usr/bin/env python3
-"""Print latest MeshKore inbox JSON (primary + optional teammate) for hyverk-cluster agents."""
-import json
-import subprocess
-import sys
+"""Print MeshKore inbox (DMs) for hyverk-lead. Auto-refreshes token if expired."""
+from __future__ import annotations
+import json, ssl, sys, urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-LOCAL = ROOT / ".meshkore.local"
-
-
-def fetch(hub: str, token: str) -> dict:
-    r = subprocess.run(
-        [
-            "curl",
-            "-sS",
-            "-m",
-            "25",
-            "-H",
-            f"Authorization: Bearer {token}",
-            f"{hub.rstrip('/')}/agents/messages",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        return {"error": r.stderr}
-    return json.loads(r.stdout)
+sys.path.insert(0, str(Path(__file__).parent))
+from _meshkore_local import load, _http
 
 
 def main() -> None:
-    if not LOCAL.exists():
-        print("Missing .meshkore.local", file=sys.stderr)
-        sys.exit(1)
-    c = json.loads(LOCAL.read_text())
-    hub = c["hub_url"]
-    for label, tok in (
-        ("primary", c["token"]),
-        ("teammate", (c.get("teammate") or {}).get("token")),
-    ):
-        if not tok:
-            continue
-        print(f"--- {label} ({c.get('agent_id', '?')}) ---")
-        print(json.dumps(fetch(hub, tok), indent=2))
+    c = load(auto_refresh=True)
+    hub, token = c["hub_url"], c["token"]
+
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+
+    req = urllib.request.Request(
+        f"{hub}/agents/messages",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
+        data = json.loads(r.read())
+
+    msgs = data.get("messages", [])
+    if not msgs:
+        print("(inbox empty)")
+        return
+    for m in msgs:
+        print(json.dumps(m, indent=2))
 
 
 if __name__ == "__main__":
