@@ -3,6 +3,7 @@ pub mod grpc_server;
 pub mod http_api;
 pub mod layer_training;
 pub mod metrics;
+pub mod node_stats;
 pub mod registry;
 pub mod router;
 pub mod serving_clusters;

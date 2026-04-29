@@ -823,8 +823,12 @@ async fn http_node_signal(
 async fn list_clusters(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let snapshot = state.ws_state.cluster_mgr.snapshot().await;
-    Json(serde_json::json!({"infra": snapshot}))
+    let infra = state.ws_state.cluster_mgr.snapshot().await;
+    let reliability = state.ws_state.node_stats.snapshot().await;
+    Json(serde_json::json!({
+        "infra": infra,
+        "node_reliability": reliability,
+    }))
 }
 
 async fn get_cluster_status(

@@ -32,6 +32,8 @@ pub struct WsState {
     pub pending_forwards: RwLock<HashMap<String, PendingForward>>,
     /// Cluster generation manager — tracks infra states and rebalancing
     pub cluster_mgr: crate::serving_clusters::ClusterManager,
+    /// Per-node reliability stats — feeds the Fase 2/3 scheduler
+    pub node_stats: crate::node_stats::NodeStatsRegistry,
 }
 
 pub struct PendingForward {
@@ -69,6 +71,7 @@ impl WsState {
             nodes: RwLock::new(HashMap::new()),
             pending_forwards: RwLock::new(HashMap::new()),
             cluster_mgr: crate::serving_clusters::ClusterManager::new(),
+            node_stats: crate::node_stats::NodeStatsRegistry::new(),
         }
     }
 
@@ -301,13 +304,16 @@ async fn handle_ws(socket: WebSocket, state: Arc<WsState>) {
     }
 
     // Cleanup — remove node and rebalance remaining GPU nodes
-    let was_gpu = {
+    let (was_gpu, node_name_dc) = {
         let mut nodes = state.nodes.write().await;
-        let was_gpu = nodes.get(&node_id_clone).map_or(false, |n| n.has_gpu);
+        let info = nodes.get(&node_id_clone).map(|n| (n.has_gpu, n.node_name.clone()));
         nodes.remove(&node_id_clone);
-        was_gpu
+        info.unwrap_or((false, String::new()))
     };
-    info!(node_id = %node_id_clone, "WebSocket client disconnected");
+    info!(node_id = %node_id_clone, name = %node_name_dc, "WebSocket client disconnected");
+    if !node_name_dc.is_empty() {
+        state.node_stats.on_disconnect(&node_name_dc).await;
+    }
     if was_gpu && crate::http_api::coordinator_model_available().await {
         trigger_rebalance(&state).await;
     }
@@ -356,6 +362,7 @@ async fn handle_client_message(
                 .map(|(s, e)| format!("{}-{}", s, e))
                 .unwrap_or_else(|| "none".to_string());
             info!(node_id, name = %node_name, gpu = has_gpu, ram = ram_mb, layers = %layers_info, "WS node registered");
+            state.node_stats.on_connect(&node_name).await;
 
             // GPU node registered: trigger rebalance across all connected GPU nodes.
             // Skip if coordinator has no model — nodes will idle until model is populated.
