@@ -59,10 +59,16 @@ pub enum CoordinatorMessage {
     InferenceEnd {
         request_id: String,
     },
-    /// Assign layers to this node (sent after GPU node registers)
+    /// Assign (or re-assign) layers to this node.
+    /// `skip_download` = true means files are already present; just restart inference server.
     LayerAssignment {
         layer_start: usize,
         layer_end: usize,
+        #[serde(default)]
+        skip_download: bool,
+        /// Cluster generation this assignment belongs to
+        #[serde(default)]
+        generation: u64,
     },
     /// Switch role
     SwitchRole {

@@ -112,6 +112,10 @@ pub async fn run_ws_worker(
     let layers_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let download_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    // Handle to the currently running inference server — shared so re-assignments can kill it.
+    let inference_server: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // GPU nodes: wait for LayerAssignment, then download safetensors layers
     // CPU nodes: training/synthesis only, report ready immediately
     if !has_gpu {
@@ -128,7 +132,7 @@ pub async fn run_ws_worker(
                 info!("WS worker shutting down");
                 break;
             }
-            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &model_dir, &coordinator_http, &assigned_layers, &layers_ready, &download_failed, &shutdown, &sampling_by_request) => {
+            result = connect_and_run(&ws_url, node_name, hardware_info, has_gpu, ram_mb, &model_dir, &coordinator_http, &assigned_layers, &layers_ready, &download_failed, &shutdown, &sampling_by_request, &inference_server) => {
                 match result {
                     Ok(()) => info!("WS connection closed cleanly"),
                     Err(e) => warn!("WS connection error: {e}"),
@@ -154,6 +158,7 @@ async fn connect_and_run(
     download_failed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     shutdown: &tokio_util::sync::CancellationToken,
     sampling_by_request: &Arc<Mutex<HashMap<String, SamplingParams>>>,
+    inference_server: &Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(url = ws_url, "Connecting WebSocket...");
 
@@ -212,44 +217,101 @@ async fn connect_and_run(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<CoordinatorMessage>(&text) {
                             Ok(coord_msg) => {
-                                // Handle LayerAssignment from coordinator
-                                if let CoordinatorMessage::LayerAssignment { layer_start, layer_end } = &coord_msg {
-                                    info!(layers = format!("{layer_start}-{layer_end}"), "Received layer assignment from coordinator");
+                                // Handle LayerAssignment from coordinator (initial or re-assignment)
+                                if let CoordinatorMessage::LayerAssignment { layer_start, layer_end, skip_download, generation } = &coord_msg {
                                     let ls = *layer_start;
                                     let le = *layer_end;
-                                    *assigned_layers.write().await = Some((ls, le));
+                                    let skip = *skip_download;
+                                    let gen = *generation;
+                                    let current = *assigned_layers.read().await;
+                                    let same_range = current == Some((ls, le));
 
-                                    // GPU nodes download safetensors layers for distributed inference
+                                    info!(
+                                        layers = format!("{ls}-{le}"),
+                                        gen,
+                                        skip_download = skip,
+                                        reassign = current.is_some(),
+                                        "Received layer assignment"
+                                    );
 
-                                    let dl_msg = ClientMessage::StateUpdate {
-                                        state: "downloading".to_string(),
-                                        detail: format!("Downloading layers {ls}-{le}"),
+                                    // Fast path: same range + skip_download → just confirm ready
+                                    if same_range && skip && layers_ready.load(std::sync::atomic::Ordering::SeqCst) {
+                                        info!(layers = format!("{ls}-{le}"), gen, "Same range — confirming ready");
+                                        let msg = ClientMessage::StateUpdate {
+                                            state: "ready".to_string(),
+                                            detail: format!("Layers {ls}-{le} loaded, inference server running"),
+                                        };
+                                        let _ = sink.send(Message::Text(serde_json::to_string(&msg).unwrap_or_default().into())).await;
+                                        continue;
+                                    }
+
+                                    // Signal reinitializing (range changed or first assignment)
+                                    let reinit_msg = ClientMessage::StateUpdate {
+                                        state: "reinitializing".to_string(),
+                                        detail: format!("Rebalancing to layers {ls}-{le}"),
                                     };
-                                    let _ = sink.send(Message::Text(serde_json::to_string(&dl_msg).unwrap_or_default().into())).await;
+                                    let _ = sink.send(Message::Text(serde_json::to_string(&reinit_msg).unwrap_or_default().into())).await;
+
+                                    // Kill previous inference server if running
+                                    {
+                                        let mut srv = inference_server.lock().await;
+                                        if let Some(child) = srv.as_mut() {
+                                            info!(layers = format!("{ls}-{le}"), "Stopping old inference server for rebalance");
+                                            let _ = child.kill().await;
+                                        }
+                                        *srv = None;
+                                    }
+
+                                    *assigned_layers.write().await = Some((ls, le));
+                                    layers_ready.store(false, std::sync::atomic::Ordering::SeqCst);
 
                                     let cache = format!("{model_dir}/inference_layers_{ls}_{le}");
+
+                                    // Download (or skip if files present)
+                                    if !skip {
+                                        let dl_msg = ClientMessage::StateUpdate {
+                                            state: "downloading".to_string(),
+                                            detail: format!("Downloading layers {ls}-{le}"),
+                                        };
+                                        let _ = sink.send(Message::Text(serde_json::to_string(&dl_msg).unwrap_or_default().into())).await;
+                                    }
+
                                     let mut ok = false;
                                     for attempt in 1..=3 {
                                         match download_layers(&cache, coordinator_http, ls, le).await {
-                                            Ok(()) => { info!("Layer weights ready (attempt {attempt})"); layers_ready.store(true, std::sync::atomic::Ordering::SeqCst); ok = true; break; }
-                                            Err(e) => { warn!("Layer download failed (attempt {attempt}/3): {e}"); if attempt < 3 { tokio::time::sleep(std::time::Duration::from_secs(10)).await; } }
+                                            Ok(()) => {
+                                                layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                ok = true;
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                warn!("Layer download failed (attempt {attempt}/3): {e}");
+                                                if attempt < 3 {
+                                                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                                                }
+                                            }
                                         }
                                     }
+
                                     let state_msg = if ok {
-                                        // Start persistent inference server
-                                        info!("Starting inference server for layers {ls}-{le}");
+                                        info!(layers = format!("{ls}-{le}"), "Starting inference server");
                                         match start_inference_server(&cache, ls, le, 18100).await {
-                                            Ok(_child) => {
-                                                info!("Inference server running on port 18100");
-                                                // Wait a moment for server to be fully ready
-                                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                            Ok(child) => {
+                                                *inference_server.lock().await = Some(child);
+                                                info!("Inference server running on :18100");
                                             }
                                             Err(e) => warn!("Failed to start inference server: {e}"),
                                         }
-                                        ClientMessage::StateUpdate { state: "ready".to_string(), detail: format!("Layers {ls}-{le} loaded, inference server running") }
+                                        ClientMessage::StateUpdate {
+                                            state: "ready".to_string(),
+                                            detail: format!("Layers {ls}-{le} loaded, inference server running"),
+                                        }
                                     } else {
                                         download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        ClientMessage::StateUpdate { state: "error".to_string(), detail: "Layer download failed".to_string() }
+                                        ClientMessage::StateUpdate {
+                                            state: "error".to_string(),
+                                            detail: "Layer download failed".to_string(),
+                                        }
                                     };
                                     let _ = sink.send(Message::Text(serde_json::to_string(&state_msg).unwrap_or_default().into())).await;
                                     continue;

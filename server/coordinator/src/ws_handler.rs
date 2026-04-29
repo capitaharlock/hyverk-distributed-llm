@@ -30,6 +30,8 @@ pub struct WsState {
     pub nodes: RwLock<HashMap<String, WsNode>>,
     /// Pending inference results: request_id → (hidden_states, next_step)
     pub pending_forwards: RwLock<HashMap<String, PendingForward>>,
+    /// Cluster generation manager — tracks infra states and rebalancing
+    pub cluster_mgr: crate::serving_clusters::ClusterManager,
 }
 
 pub struct PendingForward {
@@ -66,6 +68,7 @@ impl WsState {
         Self {
             nodes: RwLock::new(HashMap::new()),
             pending_forwards: RwLock::new(HashMap::new()),
+            cluster_mgr: crate::serving_clusters::ClusterManager::new(),
         }
     }
 
@@ -90,6 +93,47 @@ impl WsState {
             node.tx.send(Message::Binary(data.into())).is_ok()
         } else {
             false
+        }
+    }
+}
+
+/// Compute new layer split across all ready GPU nodes and send LayerAssignment
+/// to every node that needs to change (or confirm if same range).
+/// Existing nodes keep serving their old ranges until they report ready on the new gen.
+pub async fn trigger_rebalance(state: &Arc<WsState>) {
+    let nodes = state.nodes.read().await;
+    let mut gpu_nodes: Vec<(&str, &str)> = nodes
+        .values()
+        .filter(|n| n.has_gpu)
+        .map(|n| (n.node_id.as_str(), n.node_name.as_str()))
+        .collect();
+    gpu_nodes.sort_by_key(|(_, name)| *name);
+    let ready: Vec<(String, String)> = gpu_nodes
+        .iter()
+        .map(|(id, name)| (id.to_string(), name.to_string()))
+        .collect();
+    drop(nodes);
+
+    let assignments = state.cluster_mgr.rebalance(&ready).await;
+    let nodes = state.nodes.read().await;
+    for (node_id, start, end, skip_dl, gen) in &assignments {
+        if let Some(node) = nodes.get(node_id.as_str()) {
+            let msg = CoordinatorMessage::LayerAssignment {
+                layer_start: *start,
+                layer_end: *end,
+                skip_download: *skip_dl,
+                generation: *gen,
+            };
+            let json = serde_json::to_string(&msg).unwrap_or_default();
+            let _ = node.tx.send(Message::Text(json.into()));
+            info!(
+                node_id = %node_id,
+                name = %node.node_name,
+                layers = format!("{start}-{end}"),
+                skip_download = skip_dl,
+                gen,
+                "Sent layer assignment (rebalance)"
+            );
         }
     }
 }
@@ -256,9 +300,17 @@ async fn handle_ws(socket: WebSocket, state: Arc<WsState>) {
         }
     }
 
-    // Cleanup
-    state.nodes.write().await.remove(&node_id_clone);
+    // Cleanup — remove node and rebalance remaining GPU nodes
+    let was_gpu = {
+        let mut nodes = state.nodes.write().await;
+        let was_gpu = nodes.get(&node_id_clone).map_or(false, |n| n.has_gpu);
+        nodes.remove(&node_id_clone);
+        was_gpu
+    };
     info!(node_id = %node_id_clone, "WebSocket client disconnected");
+    if was_gpu && crate::http_api::coordinator_model_available().await {
+        trigger_rebalance(&state).await;
+    }
     send_task.abort();
 }
 
@@ -305,30 +357,17 @@ async fn handle_client_message(
                 .unwrap_or_else(|| "none".to_string());
             info!(node_id, name = %node_name, gpu = has_gpu, ram = ram_mb, layers = %layers_info, "WS node registered");
 
-            // GPU node registered: recalculate and broadcast layer assignments to all GPU nodes.
-            // Skip the broadcast entirely if the coordinator has no model on disk — otherwise
-            // every GPU node enters a download retry loop and reports "error", because
-            // GET /api/v1/model/config returns available=false and the shard download 404s.
+            // GPU node registered: trigger rebalance across all connected GPU nodes.
+            // Skip if coordinator has no model — nodes will idle until model is populated.
             if has_gpu {
                 if !crate::http_api::coordinator_model_available().await {
                     info!(
                         node_id = %node_id,
                         name = %node_name,
-                        "Skipping layer assignment: coordinator has no model in /data/model — node will idle until model is populated"
+                        "Skipping layer assignment: coordinator has no model in /data/model"
                     );
                 } else {
-                    let nodes = state.nodes.read().await;
-                    let mut gpu_nodes: Vec<&WsNode> = nodes.values().filter(|n| n.has_gpu).collect();
-                    gpu_nodes.sort_by_key(|n| &n.node_name);
-                    let assignments = assign_gpu_layers(&gpu_nodes);
-                    for (nid, start, end) in &assignments {
-                        if let Some(n) = nodes.get(nid.as_str()) {
-                            let msg = CoordinatorMessage::LayerAssignment { layer_start: *start, layer_end: *end };
-                            let json = serde_json::to_string(&msg).unwrap_or_default();
-                            let _ = n.tx.send(Message::Text(json.into()));
-                            info!(node_id = %nid, name = %n.node_name, layers = format!("{start}-{end}"), "Sent layer assignment");
-                        }
-                    }
+                    trigger_rebalance(state).await;
                 }
             }
         }
@@ -336,11 +375,22 @@ async fn handle_client_message(
             state: node_state,
             detail,
         } => {
-            let mut nodes = state.nodes.write().await;
-            if let Some(node) = nodes.get_mut(node_id) {
-                info!(node_id, name = %node.node_name, state = %node_state, detail = %detail, "Node state update");
-                node.state = node_state;
-                node.state_detail = detail;
+            {
+                let mut nodes = state.nodes.write().await;
+                if let Some(node) = nodes.get_mut(node_id) {
+                    info!(node_id, name = %node.node_name, state = %node_state, detail = %detail, "Node state update");
+                    node.state = node_state.clone();
+                    node.state_detail = detail;
+                }
+            }
+            match node_state.as_str() {
+                "ready" => {
+                    state.cluster_mgr.node_ready(node_id).await;
+                }
+                "reinitializing" => {
+                    state.cluster_mgr.node_reinitializing(node_id).await;
+                }
+                _ => {}
             }
         }
         ClientMessage::Heartbeat {

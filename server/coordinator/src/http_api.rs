@@ -823,8 +823,8 @@ async fn http_node_signal(
 async fn list_clusters(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let clusters = state.cluster_manager.list_clusters().await;
-    Json(serde_json::json!({"clusters": clusters}))
+    let snapshot = state.ws_state.cluster_mgr.snapshot().await;
+    Json(serde_json::json!({"infra": snapshot}))
 }
 
 async fn get_cluster_status(
