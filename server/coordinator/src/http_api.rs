@@ -1327,9 +1327,9 @@ async fn ws_inference(
         "Inference chain started"
     );
 
-    // Wait for result (10 min timeout — CPU inference on Fly is slow)
+    // Wait for result (2 min timeout; node failures now propagate immediately via dropped result_tx)
     let start = std::time::Instant::now();
-    match tokio::time::timeout(std::time::Duration::from_secs(600), result_rx).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(120), result_rx).await {
         Ok(Ok(result)) => {
             let elapsed = start.elapsed().as_secs_f64();
 
@@ -1375,8 +1375,8 @@ async fn ws_inference(
                 crate::ws_handler::broadcast_inference_end(&state.ws_state, chain, &request_id).await;
             }
             Json(serde_json::json!({
-                "error": "Inference timed out (300s)",
-                "hint": "Nodes may still be downloading model weights"
+                "error": "Inference timed out (120s)",
+                "hint": "Nodes may be downloading model weights or a node failed silently"
             })).into_response()
         }
     }

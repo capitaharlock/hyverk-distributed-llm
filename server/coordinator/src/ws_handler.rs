@@ -311,6 +311,31 @@ async fn handle_ws(socket: WebSocket, state: Arc<WsState>) {
         info.unwrap_or((false, String::new()))
     };
     info!(node_id = %node_id_clone, name = %node_name_dc, "WebSocket client disconnected");
+
+    // Immediately fail any in-flight request whose current hop was targeting this node.
+    // Without this, those requests would silently hang until the 120s HTTP timeout.
+    {
+        let mut forwards = state.pending_forwards.write().await;
+        let to_fail: Vec<String> = forwards
+            .iter()
+            .filter(|(_, p)| {
+                p.current_step < p.chain.len()
+                    && p.chain[p.current_step].node_id == node_id_clone
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for req_id in to_fail {
+            if let Some(pending) = forwards.remove(&req_id) {
+                warn!(
+                    request_id = %req_id,
+                    node_id = %node_id_clone,
+                    "Failing request — node disconnected mid-hop"
+                );
+                drop(pending.result_tx);
+            }
+        }
+    }
+
     if !node_name_dc.is_empty() {
         state.node_stats.on_disconnect(&node_name_dc).await;
     }
@@ -442,51 +467,99 @@ async fn handle_binary_data(state: &Arc<WsState>, node_id: &str, data: Vec<u8>) 
     route_forward_result(state, &request_id, hidden_states, vec![]).await;
 }
 
+/// Remove a pending request and drop result_tx, causing the HTTP handler to see
+/// a closed channel (Ok(Err)) and return a 503 immediately — no silent 600s hang.
+async fn fail_pending_request(state: &Arc<WsState>, request_id: &str, failed_node: &str) {
+    let mut forwards = state.pending_forwards.write().await;
+    if let Some(pending) = forwards.remove(request_id) {
+        warn!(
+            request_id = %request_id,
+            node_id = %failed_node,
+            "Failing in-flight request — node unreachable"
+        );
+        drop(pending.result_tx); // triggers Ok(Err) in http_api result_rx
+    }
+}
+
 async fn route_forward_result(
     state: &Arc<WsState>,
     request_id: &str,
     hidden_states: Vec<u8>,
     _shape: Vec<usize>,
 ) {
-    let mut forwards = state.pending_forwards.write().await;
-    if let Some(pending) = forwards.get_mut(request_id) {
+    // Extract next-step params under the lock, then drop before sending.
+    // Keeps the critical section small and avoids holding pending_forwards write
+    // across network sends (which can block).
+    let send_params = {
+        let mut forwards = state.pending_forwards.write().await;
+        let Some(pending) = forwards.get_mut(request_id) else { return };
         // Do not clone activations into `hidden_data` — it was unused and doubled RAM + memcpy
         // per hop (activations are already large: seq_len × hidden × 2 bytes).
         pending.hidden_data.clear();
         pending.current_step += 1;
 
         if pending.current_step < pending.chain.len() {
-            // Send to next node in chain
             let next = &pending.chain[pending.current_step];
             let (temperature, top_p, top_k) = if next.is_last {
-                (
-                    Some(pending.temperature),
-                    pending.top_p,
-                    pending.top_k,
-                )
+                (Some(pending.temperature), pending.top_p, pending.top_k)
             } else {
                 (None, None, None)
             };
-            let msg = CoordinatorMessage::InferenceForward {
-                request_id: request_id.to_string(),
-                hidden_states_ref: String::new(), // binary sent separately
-                layer_start: next.layer_start,
-                layer_end: next.layer_end,
-                is_last: next.is_last,
+            Some((
+                next.node_id.clone(),
+                next.layer_start,
+                next.layer_end,
+                next.is_last,
                 temperature,
                 top_p,
                 top_k,
-            };
-            state.send_to_node(&next.node_id, msg).await;
-            // Send binary hidden states (36-byte request id prefix, padded — matches node client)
-            let mut payload = vec![0u8; 36];
-            let rid = request_id.as_bytes();
-            let n = rid.len().min(36);
-            payload[..n].copy_from_slice(&rid[..n]);
-            payload.extend_from_slice(&hidden_states);
-            state.send_binary_to_node(&next.node_id, payload).await;
+            ))
+        } else {
+            None // last node — TokenGenerated handles completion
         }
-        // If last node, the TokenGenerated message handles completion
+    }; // write lock released here
+
+    let Some((next_node_id, layer_start, layer_end, is_last, temperature, top_p, top_k)) =
+        send_params
+    else {
+        return;
+    };
+
+    let msg = CoordinatorMessage::InferenceForward {
+        request_id: request_id.to_string(),
+        hidden_states_ref: String::new(), // binary sent separately
+        layer_start,
+        layer_end,
+        is_last,
+        temperature,
+        top_p,
+        top_k,
+    };
+
+    if !state.send_to_node(&next_node_id, msg).await {
+        warn!(
+            request_id = %request_id,
+            node_id = %next_node_id,
+            "Node gone before JSON forward — failing request"
+        );
+        fail_pending_request(state, request_id, &next_node_id).await;
+        return;
+    }
+
+    // Send binary hidden states (36-byte request_id prefix, padded — matches node client)
+    let mut payload = vec![0u8; 36];
+    let rid = request_id.as_bytes();
+    let n = rid.len().min(36);
+    payload[..n].copy_from_slice(&rid[..n]);
+    payload.extend_from_slice(&hidden_states);
+
+    if !state.send_binary_to_node(&next_node_id, payload).await {
+        warn!(
+            request_id = %request_id,
+            node_id = %next_node_id,
+            "Node gone during binary send — failing request"
+        );
+        fail_pending_request(state, request_id, &next_node_id).await;
     }
 }
 
@@ -552,6 +625,7 @@ async fn handle_generated_token(
             // Incremental decode: first node embeds only the last generated token (KV on workers).
             pending.current_step = 0;
             let first = &pending.chain[0];
+            let first_node_id = first.node_id.clone();
             let msg = CoordinatorMessage::InferenceContinue {
                 request_id: request_id.to_string(),
                 new_token_id: token_id,
@@ -562,7 +636,16 @@ async fn handle_generated_token(
                 top_p: pending.top_p,
                 top_k: pending.top_k,
             };
-            state.send_to_node(&first.node_id, msg).await;
+            drop(forwards);
+            if !state.send_to_node(&first_node_id, msg).await {
+                warn!(
+                    request_id = %request_id,
+                    node_id = %first_node_id,
+                    "First node gone during decode — failing request"
+                );
+                fail_pending_request(state, request_id, &first_node_id).await;
+            }
+            return;
         }
     }
 }
