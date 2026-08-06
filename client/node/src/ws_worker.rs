@@ -276,12 +276,13 @@ async fn connect_and_run(
                                         let _ = sink.send(Message::Text(serde_json::to_string(&dl_msg).unwrap_or_default().into())).await;
                                     }
 
-                                    let mut ok = false;
+                                    // Always attempt download_layers: it no-ops when cache exists.
+                                    // skip_download only means "prefer cache / quick path above".
+                                    let mut downloaded = false;
                                     for attempt in 1..=3 {
                                         match download_layers(&cache, coordinator_http, ls, le).await {
                                             Ok(()) => {
-                                                layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
-                                                ok = true;
+                                                downloaded = true;
                                                 break;
                                             }
                                             Err(e) => {
@@ -293,24 +294,34 @@ async fn connect_and_run(
                                         }
                                     }
 
-                                    let state_msg = if ok {
+                                    let state_msg = if !downloaded {
+                                        download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        layers_ready.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        ClientMessage::StateUpdate {
+                                            state: "error".to_string(),
+                                            detail: "Layer download failed".to_string(),
+                                        }
+                                    } else {
                                         info!(layers = format!("{ls}-{le}"), "Starting inference server");
                                         match start_inference_server(&cache, ls, le, 18100).await {
                                             Ok(child) => {
                                                 *inference_server.lock().await = Some(child);
+                                                layers_ready.store(true, std::sync::atomic::Ordering::SeqCst);
                                                 info!("Inference server running on :18100");
+                                                ClientMessage::StateUpdate {
+                                                    state: "ready".to_string(),
+                                                    detail: format!("Layers {ls}-{le} loaded, inference server running"),
+                                                }
                                             }
-                                            Err(e) => warn!("Failed to start inference server: {e}"),
-                                        }
-                                        ClientMessage::StateUpdate {
-                                            state: "ready".to_string(),
-                                            detail: format!("Layers {ls}-{le} loaded, inference server running"),
-                                        }
-                                    } else {
-                                        download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        ClientMessage::StateUpdate {
-                                            state: "error".to_string(),
-                                            detail: "Layer download failed".to_string(),
+                                            Err(e) => {
+                                                warn!("Failed to start inference server: {e}");
+                                                layers_ready.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                download_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                ClientMessage::StateUpdate {
+                                                    state: "error".to_string(),
+                                                    detail: format!("Inference server failed to start: {e}"),
+                                                }
+                                            }
                                         }
                                     };
                                     let _ = sink.send(Message::Text(serde_json::to_string(&state_msg).unwrap_or_default().into())).await;

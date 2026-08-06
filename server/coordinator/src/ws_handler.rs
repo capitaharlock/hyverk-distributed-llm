@@ -47,6 +47,8 @@ pub struct PendingForward {
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
     pub result_tx: Option<tokio::sync::oneshot::Sender<InferenceResult>>,
+    /// Active-generation in_flight counter; decremented when the request ends.
+    pub in_flight_guard: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
 }
 
 #[derive(Clone)]
@@ -161,37 +163,77 @@ pub fn assign_gpu_layers(gpu_nodes: &[&WsNode]) -> Vec<(String, usize, usize)> {
     assignments
 }
 
-/// Build inference chain from currently connected GPU nodes that are "ready".
-/// CPU nodes are excluded from inference — they do training/synthesis only.
+/// Build inference chain from the **active generation** only.
+///
+/// Does not recompute ranges from the live ready set — that race used to route
+/// pending (new) ranges to nodes still serving the previous generation.
+/// Returns empty if the active cluster is incomplete or a slot's node is gone.
 pub async fn build_inference_chain(ws_state: &WsState) -> Vec<ChainStep> {
+    let slots = ws_state.cluster_mgr.active_slots().await;
+    if slots.is_empty() {
+        return vec![];
+    }
+
     let nodes = ws_state.nodes.read().await;
-    let mut gpu_nodes: Vec<&WsNode> = nodes.values()
-        .filter(|node| node.state == "ready" && node.has_gpu)
-        .collect();
-    gpu_nodes.sort_by_key(|n| &n.node_name);
-    let assignments = assign_gpu_layers(&gpu_nodes);
-    assignments.iter().map(|(node_id, start, end)| {
-        ChainStep {
-            node_id: node_id.clone(),
-            layer_start: *start,
-            layer_end: *end,
-            is_last: *end >= 28,
+    let mut chain = Vec::with_capacity(slots.len());
+    for slot in &slots {
+        let Some(node) = nodes.get(&slot.node_id) else {
+            warn!(
+                node_id = %slot.node_id,
+                "Active slot missing from WS map — refusing chain"
+            );
+            return vec![];
+        };
+        if node.state != "ready" || !node.has_gpu {
+            warn!(
+                node_id = %slot.node_id,
+                state = %node.state,
+                "Active slot node not ready — refusing chain"
+            );
+            return vec![];
         }
-    }).collect()
+        chain.push(ChainStep {
+            node_id: slot.node_id.clone(),
+            layer_start: slot.layer_start,
+            layer_end: slot.layer_end,
+            is_last: slot.layer_end >= 28,
+        });
+    }
+
+    if !ws_state.cluster_mgr.is_operational().await {
+        return vec![];
+    }
+    chain
 }
 
-/// Check if the inference cluster is complete (all layers 0-28 covered by ready GPU nodes).
+/// Check if the inference cluster is complete.
+/// Prefers active-generation assignments; falls back to live node state for UI.
 pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
     let nodes = ws_state.nodes.read().await;
+    let active_slots = ws_state.cluster_mgr.active_slots().await;
+    let infra = ws_state.cluster_mgr.snapshot().await;
+
+    // Prefer active gen ranges for display; else show pending / live recompute for operators.
+    let mut gpu_map: std::collections::HashMap<String, (usize, usize)> = active_slots
+        .iter()
+        .map(|s| (s.node_id.clone(), (s.layer_start, s.layer_end)))
+        .collect();
+
+    if gpu_map.is_empty() {
+        if let Some(pending) = &infra.pending {
+            for s in &pending.nodes {
+                gpu_map.insert(s.node_id.clone(), (s.layer_start, s.layer_end));
+            }
+        } else {
+            let mut gpu_nodes: Vec<&WsNode> = nodes.values().filter(|n| n.has_gpu).collect();
+            gpu_nodes.sort_by_key(|n| &n.node_name);
+            for (id, s, e) in assign_gpu_layers(&gpu_nodes) {
+                gpu_map.insert(id, (s, e));
+            }
+        }
+    }
+
     let mut node_states: Vec<NodeInferenceState> = Vec::new();
-
-    // GPU nodes get dynamic layer assignments; CPU nodes show 0-0 (no inference)
-    let mut gpu_nodes: Vec<&WsNode> = nodes.values().filter(|n| n.has_gpu).collect();
-    gpu_nodes.sort_by_key(|n| &n.node_name);
-    let gpu_assignments = assign_gpu_layers(&gpu_nodes);
-    let gpu_map: std::collections::HashMap<String, (usize, usize)> = gpu_assignments
-        .iter().map(|(id, s, e)| (id.clone(), (*s, *e))).collect();
-
     for node in nodes.values() {
         let (start, end) = gpu_map.get(&node.node_id).copied().unwrap_or((0, 0));
         node_states.push(NodeInferenceState {
@@ -206,27 +248,16 @@ pub async fn cluster_status(ws_state: &WsState) -> ClusterStatus {
     }
     node_states.sort_by_key(|n| n.layer_start);
 
-    let ready_gpu: Vec<&NodeInferenceState> = node_states.iter()
-        .filter(|n| n.state == "ready" && n.layer_end > 0)
-        .collect();
-    let all_gpu_ready = !ready_gpu.is_empty() && gpu_nodes.iter().all(|n| n.state == "ready");
+    let operational = ws_state.cluster_mgr.is_operational().await
+        && !active_slots.is_empty()
+        && active_slots.iter().all(|s| {
+            nodes
+                .get(&s.node_id)
+                .map(|n| n.state == "ready" && n.has_gpu)
+                .unwrap_or(false)
+        });
 
-    // Check full layer coverage from GPU nodes only
-    let mut covered = false;
-    if !ready_gpu.is_empty() {
-        let starts_at_zero = ready_gpu.first().map_or(false, |n| n.layer_start == 0);
-        let ends_at_28 = ready_gpu.last().map_or(false, |n| n.layer_end >= 28);
-        let mut no_gaps = true;
-        for i in 1..ready_gpu.len() {
-            if ready_gpu[i].layer_start > ready_gpu[i - 1].layer_end {
-                no_gaps = false;
-                break;
-            }
-        }
-        covered = starts_at_zero && ends_at_28 && no_gaps;
-    }
-
-    let status = if covered && all_gpu_ready {
+    let status = if operational {
         "operational".to_string()
     } else if node_states.is_empty() {
         "no_nodes".to_string()
@@ -331,6 +362,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<WsState>) {
                     node_id = %node_id_clone,
                     "Failing request — node disconnected mid-hop"
                 );
+                release_in_flight(&pending, &state.cluster_mgr);
                 drop(pending.result_tx);
             }
         }
@@ -396,7 +428,7 @@ async fn handle_client_message(
                     info!(
                         node_id = %node_id,
                         name = %node_name,
-                        "Skipping layer assignment: coordinator has no model in /data/model"
+                        "Skipping layer assignment: coordinator has no model (set HYVERK_MODEL_DIR)"
                     );
                 } else {
                     trigger_rebalance(state).await;
@@ -467,6 +499,18 @@ async fn handle_binary_data(state: &Arc<WsState>, node_id: &str, data: Vec<u8>) 
     route_forward_result(state, &request_id, hidden_states, vec![]).await;
 }
 
+/// Drop in_flight accounting for a finished/failed request.
+pub fn release_in_flight(pending: &PendingForward, cluster_mgr: &crate::serving_clusters::ClusterManager) {
+    if let Some(ref guard) = pending.in_flight_guard {
+        crate::serving_clusters::ClusterManager::request_end(guard);
+        // Fire-and-forget retirement check — cheap.
+        let mgr = cluster_mgr.clone();
+        tokio::spawn(async move {
+            mgr.maybe_retire_draining().await;
+        });
+    }
+}
+
 /// Remove a pending request and drop result_tx, causing the HTTP handler to see
 /// a closed channel (Ok(Err)) and return a 503 immediately — no silent 600s hang.
 async fn fail_pending_request(state: &Arc<WsState>, request_id: &str, failed_node: &str) {
@@ -477,6 +521,7 @@ async fn fail_pending_request(state: &Arc<WsState>, request_id: &str, failed_nod
             node_id = %failed_node,
             "Failing in-flight request — node unreachable"
         );
+        release_in_flight(&pending, &state.cluster_mgr);
         drop(pending.result_tx); // triggers Ok(Err) in http_api result_rx
     }
 }
@@ -608,8 +653,17 @@ async fn handle_generated_token(
             let generated_ids = pending.generated.clone();
             let tokens = pending.generated.len();
             let result_tx = pending.result_tx.take();
+            let in_flight_guard = pending.in_flight_guard.clone();
             forwards.remove(request_id);
             drop(forwards);
+
+            if let Some(ref guard) = in_flight_guard {
+                crate::serving_clusters::ClusterManager::request_end(guard);
+                let mgr = state.cluster_mgr.clone();
+                tokio::spawn(async move {
+                    mgr.maybe_retire_draining().await;
+                });
+            }
 
             if let Some(tx) = result_tx {
                 let _ = tx.send(InferenceResult {

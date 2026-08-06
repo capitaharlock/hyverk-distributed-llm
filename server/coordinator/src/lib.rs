@@ -3,6 +3,7 @@ pub mod grpc_server;
 pub mod http_api;
 pub mod layer_training;
 pub mod metrics;
+pub mod model_paths;
 pub mod node_stats;
 pub mod registry;
 pub mod router;
@@ -148,8 +149,9 @@ pub async fn run_coordinator(
     });
 
     let http_router = TaskRouter::new(registry.clone(), task_store.clone());
-    let cluster_manager = serving_clusters::ClusterManager::new();
     let ws_state = Arc::new(ws_handler::WsState::new());
+    let model_dir = crate::model_paths::model_dir();
+    info!(path = %model_dir.display(), "Coordinator model directory (HYVERK_MODEL_DIR)");
     let app = http_api::create_router(AppState {
         task_store,
         registry,
@@ -157,7 +159,8 @@ pub async fn run_coordinator(
         dataset_store,
         training_store,
         layer_training,
-        cluster_manager,
+        // Same Arc-backed manager as ws_state — keep a handle for future non-WS callers.
+        cluster_manager: ws_state.cluster_mgr.clone(),
         pending_signals: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ws_state,
         rag_store,

@@ -55,13 +55,24 @@ powershell -ExecutionPolicy Bypass -File deploy\setup.ps1
 | CMake | `brew install cmake` | `winget install cmake` | `apt install cmake` |
 | GPU | Metal (automatic) | CUDA Toolkit | CUDA Toolkit |
 
-### Run
+### Run (local cluster — preferred while Fly is down)
+
+```bash
+bash scripts/prepare-model.sh          # once, on the coordinator host
+bash scripts/run-coordinator-local.sh  # HTTP :17000
+# on each GPU Mac:
+bash scripts/run-node-local.sh http://<coordinator-lan-ip>:17000
+```
+
+See `scripts/LOCAL_CLUSTER.md`. Optional: `HYVERK_API_KEY` gates `POST /api/v1/ws-inference`.
+
+### Run (legacy single binary)
 
 ```bash
 ./target/release/hyverk --config ~/.hyverk/config.toml --mode node
 ```
 
-Dashboard: https://hyverk-coordinator.fly.dev
+Former public coordinator hostname (`hyverk-coordinator.fly.dev`) is currently offline; use a LAN coordinator instead.
 
 ### Hyverk-node (WS client for distributed inference / training)
 

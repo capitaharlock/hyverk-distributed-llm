@@ -8,8 +8,9 @@ use crate::training_store::TrainingStore;
 use crate::layer_training::LayerTrainingStore;
 use crate::metrics::LiveCounters;
 use hyverk_rag::{RagConfig, SourceType, store::RagStore};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -35,6 +36,15 @@ pub struct AppState {
 }
 
 pub fn create_router(state: AppState) -> Router {
+    let state = Arc::new(state);
+
+    // Public inference surface — gated when HYVERK_API_KEY is set.
+    let inference_api = Router::new()
+        .route("/api/v1/ws-inference", post(ws_inference))
+        .route("/api/v1/inference", post(create_inference))
+        .route("/api/v1/inference/distributed", post(proxy_distributed_inference))
+        .route_layer(middleware::from_fn(require_api_key));
+
     Router::new()
         .route("/", get(dashboard))
         .route("/models", get(models_page))
@@ -42,11 +52,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/test", get(test_page))
         .route("/health", get(health))
         .route("/ws", get(crate::ws_handler::ws_upgrade))
-        // Model weight serving — clients download assigned layers
+        // Model weight serving — clients download assigned layers (LAN / local trust)
         .route("/api/v1/model/shard/{filename}", get(serve_model_shard))
         .route("/api/v1/model/config", get(serve_model_config))
-        // Inference
-        .route("/api/v1/inference", post(create_inference))
         .route("/api/v1/inference/{task_id}", get(get_inference))
         .route("/api/v1/nodes", get(list_nodes))
         // Dataset (synthesis Phase 2 + verification Phase 3)
@@ -64,10 +72,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/training/jobs/{job_id}/shards/{shard_id}/submit", post(submit_adapter))
         // Dashboard metrics (Phase 2.5)
         .route("/api/v1/metrics", get(get_metrics))
-        // Distributed inference via WebSocket chain
-        .route("/api/v1/ws-inference", post(ws_inference))
-        // Distributed inference proxy
-        .route("/api/v1/inference/distributed", post(proxy_distributed_inference))
         // Node registration + control
         .route("/api/v1/node/register", post(http_register))
         .route("/api/v1/node/heartbeat", post(http_heartbeat))
@@ -94,8 +98,35 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/rag/search", get(rag_search))
         .route("/api/v1/rag/sources", get(rag_sources))
         .route("/api/v1/rag/context", get(rag_context))
+        .merge(inference_api)
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)) // 256MB
-        .with_state(Arc::new(state))
+        .with_state(state)
+}
+
+/// Optional API key gate. Unset/empty `HYVERK_API_KEY` → open (local/dev).
+/// When set, require `Authorization: Bearer <key>` or `X-Api-Key: <key>`.
+async fn require_api_key(req: Request, next: Next) -> Result<impl IntoResponse, StatusCode> {
+    let expected = match std::env::var("HYVERK_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => return Ok(next.run(req).await),
+    };
+
+    let headers = req.headers();
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        });
+
+    match provided {
+        Some(key) if key == expected => Ok(next.run(req).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
 }
 
 async fn health() -> &'static str {
@@ -717,7 +748,7 @@ async fn serve_model_shard(
         return (StatusCode::BAD_REQUEST, "Invalid file type").into_response();
     }
     let safe_name = filename.replace("..", "").replace("/", "");
-    let path = format!("/data/model/{}", safe_name);
+    let path = crate::model_paths::model_file(&safe_name);
 
     match tokio::fs::File::open(&path).await {
         Ok(file) => {
@@ -734,15 +765,15 @@ async fn serve_model_shard(
     }
 }
 
-/// Read and validate the on-disk model state at `/data/model`.
+/// Read and validate the on-disk model state under `HYVERK_MODEL_DIR` (default `/data/model`).
 /// Returned tuple: (index_val, config_val, available). When `available` is false
 /// the JSON values may still be partial (Null) — callers must not trust them.
 pub async fn read_coordinator_model_state() -> (serde_json::Value, serde_json::Value, bool) {
-    let index_path = "/data/model/model.safetensors.index.json";
-    let config_path = "/data/model/config.json";
+    let index_path = crate::model_paths::model_file("model.safetensors.index.json");
+    let config_path = crate::model_paths::model_file("config.json");
 
-    let index_raw = tokio::fs::read_to_string(index_path).await.unwrap_or_default();
-    let config_raw = tokio::fs::read_to_string(config_path).await.unwrap_or_default();
+    let index_raw = tokio::fs::read_to_string(&index_path).await.unwrap_or_default();
+    let config_raw = tokio::fs::read_to_string(&config_path).await.unwrap_or_default();
 
     let index_val: serde_json::Value =
         serde_json::from_str(index_raw.trim()).unwrap_or(serde_json::Value::Null);
@@ -773,12 +804,17 @@ async fn serve_model_config() -> impl IntoResponse {
     let (index_val, config_val, available) = read_coordinator_model_state().await;
 
     if !available {
+        let dir = crate::model_paths::model_dir();
         return Json(serde_json::json!({
             "available": false,
             "config": null,
             "index": null,
             "coordinator_model_status": "missing_or_invalid",
-            "hint": "Coordinator reads /data/model/{config.json,model.safetensors.index.json,tokenizer.json,*.safetensors}. Mount or copy a full sharded checkpoint there (Fly: volume + upload). Nodes poll GET /api/v1/model/config before layer download.",
+            "model_dir": dir.display().to_string(),
+            "hint": format!(
+                "Coordinator reads {{config.json,model.safetensors.index.json,tokenizer.json,*.safetensors}} under {}. Set HYVERK_MODEL_DIR or run scripts/prepare-model.sh. Nodes poll GET /api/v1/model/config before layer download.",
+                dir.display()
+            ),
         }));
     }
 
@@ -1264,9 +1300,20 @@ async fn ws_inference(
         return Json(serde_json::json!({"error": "prompt required"})).into_response();
     }
 
-    // Build chain from connected WS nodes
+    // Pin to the active generation before building the chain.
+    let in_flight_guard = match state.ws_state.cluster_mgr.request_start().await {
+        Some(g) => g,
+        None => {
+            return Json(serde_json::json!({
+                "error": "Inference cluster not operational",
+                "hint": "Wait until GET /api/v1/cluster/status reports operational (all GPU nodes ready on an active generation)"
+            })).into_response();
+        }
+    };
+
     let chain = crate::ws_handler::build_inference_chain(&state.ws_state).await;
     if chain.is_empty() {
+        crate::serving_clusters::ClusterManager::request_end(&in_flight_guard);
         return Json(serde_json::json!({
             "error": "No inference nodes connected via WebSocket",
             "hint": "Start Mac node with coordinator_url pointing to this coordinator, wait for nodes to download layers"
@@ -1279,7 +1326,10 @@ async fn ws_inference(
     // Tokenize prompt
     let token_ids = match tokenize_prompt(&prompt).await {
         Ok(ids) => ids,
-        Err(e) => return Json(serde_json::json!({"error": format!("Tokenize failed: {e}")})).into_response(),
+        Err(e) => {
+            crate::serving_clusters::ClusterManager::request_end(&in_flight_guard);
+            return Json(serde_json::json!({"error": format!("Tokenize failed: {e}")})).into_response();
+        }
     };
 
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -1299,6 +1349,7 @@ async fn ws_inference(
             top_p,
             top_k,
             result_tx: Some(result_tx),
+            in_flight_guard: Some(in_flight_guard.clone()),
         });
     }
 
@@ -1316,7 +1367,11 @@ async fn ws_inference(
     }).await;
 
     if !sent {
-        state.ws_state.pending_forwards.write().await.remove(&request_id);
+        if let Some(pending) = state.ws_state.pending_forwards.write().await.remove(&request_id) {
+            crate::ws_handler::release_in_flight(&pending, &state.ws_state.cluster_mgr);
+        } else {
+            crate::serving_clusters::ClusterManager::request_end(&in_flight_guard);
+        }
         return Json(serde_json::json!({"error": "Failed to reach first node"})).into_response();
     }
 
@@ -1357,22 +1412,24 @@ async fn ws_inference(
             })).into_response()
         }
         Ok(Err(_)) => {
-            let chain_opt = {
+            let removed = {
                 let mut fw = state.ws_state.pending_forwards.write().await;
-                fw.remove(&request_id).map(|p| p.chain)
+                fw.remove(&request_id)
             };
-            if let Some(ref chain) = chain_opt {
-                crate::ws_handler::broadcast_inference_end(&state.ws_state, chain, &request_id).await;
+            if let Some(pending) = removed {
+                crate::ws_handler::release_in_flight(&pending, &state.ws_state.cluster_mgr);
+                crate::ws_handler::broadcast_inference_end(&state.ws_state, &pending.chain, &request_id).await;
             }
             Json(serde_json::json!({"error": "Inference channel closed unexpectedly"})).into_response()
         }
         Err(_) => {
-            let chain_opt = {
+            let removed = {
                 let mut fw = state.ws_state.pending_forwards.write().await;
-                fw.remove(&request_id).map(|p| p.chain)
+                fw.remove(&request_id)
             };
-            if let Some(ref chain) = chain_opt {
-                crate::ws_handler::broadcast_inference_end(&state.ws_state, chain, &request_id).await;
+            if let Some(pending) = removed {
+                crate::ws_handler::release_in_flight(&pending, &state.ws_state.cluster_mgr);
+                crate::ws_handler::broadcast_inference_end(&state.ws_state, &pending.chain, &request_id).await;
             }
             Json(serde_json::json!({
                 "error": "Inference timed out (120s)",
@@ -1390,10 +1447,19 @@ async fn tokenize_prompt(prompt: &str) -> Result<Vec<u32>, String> {
         prompt
     );
 
+    let tok_path = crate::model_paths::first_existing_tokenizer()
+        .ok_or_else(|| {
+            format!(
+                "tokenizer.json not found (checked {:?})",
+                crate::model_paths::tokenizer_candidates()
+            )
+        })?;
+    let tok_path_str = tok_path.to_string_lossy().to_string();
+
     let script = r#"
 import sys, json
 from tokenizers import Tokenizer
-t = Tokenizer.from_file('/data/tokenizer.json' if __import__('os').path.exists('/data/tokenizer.json') else '/app/tokenizer.json')
+t = Tokenizer.from_file(sys.argv[2])
 enc = t.encode(sys.argv[1])
 print(json.dumps(enc.ids))
 "#;
@@ -1402,6 +1468,7 @@ print(json.dumps(enc.ids))
         .arg("-c")
         .arg(script)
         .arg(&formatted)
+        .arg(&tok_path_str)
         .output()
         .await
         .map_err(|e| format!("Python error: {e}"))?;
@@ -1428,10 +1495,14 @@ async fn decode_tokens(ids: &[u32]) -> Result<String, String> {
 
     let ids_json = serde_json::to_string(&clean_ids).unwrap_or_default();
 
+    let tok_path = crate::model_paths::first_existing_tokenizer()
+        .ok_or_else(|| "tokenizer.json not found".to_string())?;
+    let tok_path_str = tok_path.to_string_lossy().to_string();
+
     let script = r#"
 import sys, json
 from tokenizers import Tokenizer
-t = Tokenizer.from_file('/data/tokenizer.json' if __import__('os').path.exists('/data/tokenizer.json') else '/app/tokenizer.json')
+t = Tokenizer.from_file(sys.argv[2])
 ids = json.loads(sys.argv[1])
 print(t.decode(ids), end='')
 "#;
@@ -1440,6 +1511,7 @@ print(t.decode(ids), end='')
         .arg("-c")
         .arg(script)
         .arg(&ids_json)
+        .arg(&tok_path_str)
         .output()
         .await
         .map_err(|e| format!("Python error: {e}"))?;

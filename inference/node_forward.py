@@ -179,7 +179,7 @@ def download_layers(args):
         if hint:
             err = f"{err}. {hint}"
         else:
-            err = f"{err} (leader: populate /data/model on Fly coordinator — see coordinator GET /api/v1/model/config hint after deploy)"
+            err = f"{err} (populate HYVERK_MODEL_DIR on the coordinator — see scripts/prepare-model.sh and GET /api/v1/model/config)"
         print(err, file=sys.stderr)
         print(json.dumps({"error": err, "coordinator_model_status": status or None, "hint": hint or None}))
         sys.exit(1)
