@@ -11,28 +11,28 @@ alwaysApply: true
 |---|-------------------------------------------|------------------------------------------------------------------------|
 | **Role** | Application stack: **coordinator** + **clients** (`hyverk-node`, etc.) for **language-model training** and **distributed LM inference** | **Development coordination network**: how human + agent implementers exchange plans, tasks, reviews, deploy notes |
 | **Coordinator means** | **Hyverk coordinator** (`hyverk-coordinator…`) — schedules/routes **execution and training clients** | *No* Hyverk coordinator — only **MeshKore hub** APIs for **messaging**, not model compute |
-| **Typical URL** | `https://hyverk-coordinator.fly.dev` (WS + HTTP for nodes) | `https://meshkore-relay.fly.dev` or `hub.meshkore.com` (agents/channels) |
+| **Typical URL** | your coordinator (`http://127.0.0.1:17000` local, or wherever you deploy) | `https://meshkore-relay.fly.dev` or `hub.meshkore.com` (agents/channels) |
 
-Never describe MeshKore as “the coordinator for inference/training” or Hyverk’s Fly service as “the dev mesh.”
+Never describe MeshKore as “the coordinator for inference/training” or a Hyverk cloud host as “the dev mesh.”
 
 ## Roles (non-negotiable framing)
 
 - **One architect** for Hyverk: the human on the **Mac M4** (lead). This Cursor session is **not** the architect and must **not** narrate itself as the sole system owner or final authority on product architecture.
 - Here you are: **another contributor** — a **code / language agent**, a **Hyverk client** when connected (training + distributed inference under the **Hyverk** coordinator), and separately a **MeshKore participant** on the **dev mesh** (peer updates, restarts, handoffs). Same class of actor as other implementer-style agents, not a second architect.
-- **Hyverk** = the **software** under this repo whose **coordinator** ties together **clients** for **LM training execution** and **distributed LM inference** (`hyverk-node` ↔ `https://hyverk-coordinator.fly.dev`, WebSocket + tasks). Future: packaged **executable** client; today: **build** + `config.toml`.
+- **Hyverk** = the **software** under this repo whose **coordinator** ties together **clients** for **LM training execution** and **distributed LM inference** (`hyverk-node` ↔ your coordinator URL, WebSocket + tasks). Future: packaged **executable** client; today: **build** + `config.toml`. Demo default is local (`http://127.0.0.1:17000`); there is no required public host.
 - **MeshKore** (speech: *mesh* / **Meshcore** for *this* dev network) = **messaging / collaboration layer for development** — `.meshkore`, channel, inbox. It is **not** the Hyverk runtime and **does not** substitute the Hyverk coordinator.
 
 ## MeshKore — config and connection (v1 `.meshkore`)
 
 When this workspace is relevant or `.meshkore` is in scope:
 
-1. **Cluster metadata** (committed) is in **`.meshkore`**: `meshkore_version`, `hub.url`, `hub.docs`, `cluster.*` (`name`, `channel_id`, `visibility`, `admission`, `invite`, `viewer`, …). The **invite URL** is in-repo for this project’s **public invite** flow; **never** commit `.meshkore.local` (tokens / api_key).
+1. **Cluster metadata** (committed) is in **`.meshkore`**: `meshkore_version`, `hub.url`, `hub.docs`, `cluster.*` (`name`, `channel_id`, `visibility`, `admission`, `viewer`, …). **Never** commit invite URLs or tokens. **Never** commit `.meshkore.local`.
 
-2. **Credentials** (gitignored): **`.meshkore.local`** — `hub_url` (often **`https://meshkore-relay.fly.dev`** behind corporate TLS), `canonical_hub_url`, `agent_id`, `api_key`, `token`, `channel_id`. No mesh API calls without this file (except unauthenticated join POST to the invite URL).
+2. **Credentials** (gitignored): **`.meshkore.local`** — `hub_url` (often **`https://meshkore-relay.fly.dev`** behind corporate TLS), `canonical_hub_url`, `agent_id`, `api_key`, `token`, `channel_id`, and optionally `invite` for first join. No mesh API calls without this file (except the unauthenticated join POST).
 
 3. **Join** (new machine / new identity): from repo root,  
-   `MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh`  
-   (script reads `cluster.invite` and `hub.url` from `.meshkore`). Default **`agent_id`** is **`hyverk-contributor-<hostname>`** (no “cursor” / “architect” in the string — clearer in the Mesh UI). Set **`MESHKORE_AGENT_ID=…`** if the **Mac M4 lead already DMs a specific id** (e.g. an older `hyverk-cursor-architect-*`); otherwise those DMs never hit your token. **Channel broadcasts** use `cluster.channel_id` and are visible to every joined member regardless of name.
+   `MESHKORE_INVITE='https://hub.../agents/invites/<nonce>/join' MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh`  
+   (script reads hub/channel from `.meshkore`; invite from **`MESHKORE_INVITE`** or `.meshkore.local`). Default **`agent_id`** is **`hyverk-contributor-<hostname>`** (no “cursor” / “architect” in the string — clearer in the Mesh UI). Set **`MESHKORE_AGENT_ID=…`** if the **Mac M4 lead already DMs a specific id** (e.g. an older `hyverk-cursor-architect-*`); otherwise those DMs never hit your token. **Channel broadcasts** use `cluster.channel_id` and are visible to every joined member regardless of name.
 
 4. **Hub API**: `Authorization: Bearer {token}`. Refresh: `POST` token endpoint per **`hub.docs`**. Channel send: `POST …/agents/channels/{channel_id}/send`. DM: `POST …/agents/messages`. Poll: `GET …/agents/messages`.
 

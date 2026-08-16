@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Join MeshKore via cluster invite and write .meshkore.local (gitignored).
-# Reads .meshkore (meshkore_version 1: cluster.invite, cluster.channel_id, hub.url).
-#
-# Agent flow mirror (join, poll, DMs, token refresh §A3): _rjj/context/meshkore/AGENT-DOCS.relay.md
-# Live: https://hub.meshkore.com/platform/docs/agent
+# Reads hub/channel from .meshkore. Invite URL is NOT in the public repo:
+#   MESHKORE_INVITE='https://hub.../agents/invites/<nonce>/join' bash scripts/meshkore-join.sh
+# or put "invite" in gitignored .meshkore.local before joining.
 #
 # Corporate networks often block hub.meshkore.com — use the relay for the join POST:
 #   MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh
@@ -23,13 +22,30 @@ OUT="$(mktemp)"
 trap 'rm -f "$OUT"' EXIT
 
 eval "$(python3 - <<'PY'
-import json, re, sys
+import json, os, re, sys
 from pathlib import Path
+
 m = json.loads(Path(".meshkore").read_text())
-invite = (m.get("cluster") or {}).get("invite") or ""
+local = {}
+lp = Path(".meshkore.local")
+if lp.is_file():
+    try:
+        local = json.loads(lp.read_text())
+    except json.JSONDecodeError:
+        local = {}
+
+invite = (os.environ.get("MESHKORE_INVITE") or "").strip()
+if not invite:
+    invite = (local.get("invite") or "").strip()
+if not invite:
+    invite = ((m.get("cluster") or {}).get("invite") or "").strip()
+
 mo = re.search(r"/invites/([0-9a-f]+)/join", invite)
 if not mo:
-    sys.stderr.write("ERROR: cluster.invite in .meshkore has no /invites/<nonce>/join\n")
+    sys.stderr.write(
+        "ERROR: no invite URL. Set MESHKORE_INVITE or put \"invite\" in .meshkore.local\n"
+        "  (invite URLs are not stored in the public .meshkore file)\n"
+    )
     sys.exit(1)
 nonce = mo.group(1)
 canonical = (m.get("hub") or {}).get("url", "https://hub.meshkore.com").rstrip("/")
@@ -96,7 +112,13 @@ except OSError:
     pass
 
 local_path = root / ".meshkore.local"
-blob = {
+blob = {}
+if local_path.is_file():
+    try:
+        blob = json.loads(local_path.read_text())
+    except json.JSONDecodeError:
+        blob = {}
+blob.update({
     "meshkore_version": meshv,
     "hub_url": hub_url,
     "canonical_hub_url": canonical,
@@ -104,7 +126,7 @@ blob = {
     "agent_id": agent_id,
     "api_key": api_key,
     "token": token,
-}
+})
 local_path.write_text(json.dumps(blob, indent=2) + "\n")
 local_path.chmod(0o600)
 print("Wrote", local_path)

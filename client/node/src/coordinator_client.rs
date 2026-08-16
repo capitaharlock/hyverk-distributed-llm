@@ -26,7 +26,7 @@ impl CoordinatorConnection {
             .map_err(|e| HyverkError::Transport(format!("HTTP client error: {e}")))?;
 
         // Derive HTTP base URL from coordinator_url
-        // Input might be "http://localhost:17001" (old gRPC) or "https://hyverk-coordinator.fly.dev"
+        // Input might be "http://127.0.0.1:17000" or any HTTPS coordinator URL
         let base_url = if coordinator_url.contains(":17001") {
             coordinator_url.replace(":17001", ":17000")
         } else if coordinator_url.contains("fly.dev") && !coordinator_url.starts_with("https") {

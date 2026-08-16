@@ -20,7 +20,7 @@ import numpy as np
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-COORDINATOR_URL = os.environ.get("HYVERK_COORDINATOR", "https://hyverk-coordinator.fly.dev")
+COORDINATOR_URL = os.environ.get("HYVERK_COORDINATOR", "http://127.0.0.1:17000")
 DEFAULT_MODEL_DIR = os.environ.get("HYVERK_MODEL_DIR",
                     os.path.expanduser("~/.hyverk/qwen2.5-7b/inference_layers_0_28"))
 DEFAULT_MAX_TOKENS = 256

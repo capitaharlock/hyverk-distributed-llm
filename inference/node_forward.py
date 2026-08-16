@@ -123,7 +123,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--mode", required=True, choices=["download","embed","forward","generate","serve"])
     p.add_argument("--model-dir", required=True, help="Local dir for cached layer weights")
-    p.add_argument("--coordinator", default="https://hyverk-coordinator.fly.dev")
+    p.add_argument("--coordinator", default="http://127.0.0.1:17000")
     p.add_argument("--layer-start", type=int, default=0)
     p.add_argument("--layer-end", type=int, default=28)
     p.add_argument("--input-file", default="", help="Input hidden states (binary torch tensor)")

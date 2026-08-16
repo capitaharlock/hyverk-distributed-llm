@@ -4,8 +4,10 @@ Distributed network for training and serving open-source coding models. Contribu
 
 ## Architecture
 
+This is a **demo / source repository**. There is no hosted public coordinator to point at by default. Run a local cluster (see below), or deploy the coordinator wherever you prefer.
+
 ```
-Contributors (Mac/Windows/Linux)     Coordinator (Fly.io)
+Contributors (Mac/Windows/Linux)     Coordinator (your host)
 ┌──────────────┐                     ┌──────────────────┐
 │  GPU Client  │◄──── WebSocket ────►│  Orchestrator    │
 │  LoRA Train  │     + HTTP API      │  Task Router     │
@@ -18,7 +20,7 @@ Contributors (Mac/Windows/Linux)     Coordinator (Fly.io)
 └──────────────┘
 ```
 
-**Coordinator** — Central hub on Fly.io. Manages nodes, distributes training shards, routes inference, serves the dashboard.
+**Coordinator** — Central hub you run yourself (LAN or any cloud). Manages nodes, distributes training shards, routes inference, serves the dashboard.
 
 **Clients** — Run on contributor machines. Connect to the coordinator, contribute compute for training, synthesis, or inference depending on hardware.
 
@@ -85,17 +87,19 @@ Use a **gitignored** `config.toml` with `coordinator_url`, `node.name`, and `har
 
 ### MeshKore (dev mesh — Mac M4 lead + `hyverk-lead` messages)
 
-This is **separate** from the Hyverk Fly coordinator: same repo, **`.meshkore`** (invite + `channel_id`) + **`.meshkore.local`** (Bearer token, never commit). Join once, then poll inbox or run the listener.
+This is **separate** from the Hyverk coordinator: same repo, **`.meshkore`** (public cluster metadata) + **`.meshkore.local`** (invite URL, Bearer token — never commit). Join once, then poll inbox or run the listener.
 
 ```bash
-MESHKORE_HUB_URL=https://meshkore-relay.fly.dev bash scripts/meshkore-join.sh
+MESHKORE_INVITE='https://hub.meshkore.com/agents/invites/<nonce>/join' \
+  MESHKORE_HUB_URL=https://meshkore-relay.fly.dev \
+  bash scripts/meshkore-join.sh
 # If the lead DMs a fixed agent_id, match it:
 # MESHKORE_AGENT_ID=hyverk-cursor-architect-435d95 bash scripts/meshkore-join.sh
 python3 scripts/meshkore-dump-inbox.py
 # optional: python3 scripts/meshkore-listener.py
 ```
 
-Cached hub onboarding (join / poll / channel / §A3 token refresh): **`_rjj/context/meshkore/AGENT-DOCS.relay.md`**. Cluster viewer link is in **`.meshkore`** → `cluster.viewer`.
+Cached hub onboarding for core developers (after git-crypt unlock): **`_rjj/context/meshkore/AGENT-DOCS.relay.md`**. Cluster viewer link is in **`.meshkore`** → `cluster.viewer`.
 
 ## Project Structure
 
@@ -159,7 +163,9 @@ model = "llama-3.3-70b-versatile"
 
 ## Encrypted files (`_rjj/`)
 
-This repository is **public**. The `_rjj/` tree holds **private development notes** (internal context, deploy scratch, logs). Paths under `_rjj/` are tracked with [git-crypt](https://github.com/AGWA/git-crypt): clones see file names and ciphertext only. Plaintext is available after unlock with the team key.
+This repository is **public**. `_rjj/` is **private lead-developer context** (notes, deploy scratch, internal logs; it may hold credentials or other secrets). It stays **encrypted** with [git-crypt](https://github.com/AGWA/git-crypt) and is **not** meant to be decrypted for the public. Without the team key, treat those paths as opaque.
+
+Authorized core developers unlock locally with the shared key:
 
 ```bash
 # Install git-crypt
@@ -167,7 +173,7 @@ brew install git-crypt          # macOS
 scoop install git-crypt         # Windows
 sudo apt install git-crypt      # Linux
 
-# Unlock after cloning (key shared out-of-band with the team)
+# Unlock after cloning (key shared out-of-band with core developers only)
 git-crypt unlock /path/to/hyverk-git-crypt-key
 ```
 
