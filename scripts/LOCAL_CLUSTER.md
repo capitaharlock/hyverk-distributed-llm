@@ -1,6 +1,6 @@
-# Local multi-Mac cluster (no Fly)
+# Local multi-Mac cluster
 
-Prepare code and machines so you can bring the stack up on a LAN without deploying.
+Prepare code and machines so you can bring the stack up on a LAN.
 
 ## Quick smoke (one machine, no model download)
 

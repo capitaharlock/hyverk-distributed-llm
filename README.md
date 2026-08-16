@@ -55,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File deploy\setup.ps1
 | CMake | `brew install cmake` | `winget install cmake` | `apt install cmake` |
 | GPU | Metal (automatic) | CUDA Toolkit | CUDA Toolkit |
 
-### Run (local cluster — preferred while Fly is down)
+### Run (local cluster)
 
 ```bash
 bash scripts/prepare-model.sh          # once, on the coordinator host
@@ -71,8 +71,6 @@ See `scripts/LOCAL_CLUSTER.md`. Optional: `HYVERK_API_KEY` gates `POST /api/v1/w
 ```bash
 ./target/release/hyverk --config ~/.hyverk/config.toml --mode node
 ```
-
-Former public coordinator hostname (`hyverk-coordinator.fly.dev`) is currently offline; use a LAN coordinator instead.
 
 ### Hyverk-node (WS client for distributed inference / training)
 
@@ -145,7 +143,7 @@ mode = "node"
 
 [node]
 name = "my-machine"
-coordinator_url = "https://hyverk-coordinator.fly.dev"
+coordinator_url = "http://COORDINATOR_HOST:17000"
 models_dir = "~/.hyverk/models"
 max_concurrent_tasks = 2
 hardware_info = "Apple M4 Max, Metal GPU"
@@ -159,13 +157,9 @@ api_key = "gsk_..."
 model = "llama-3.3-70b-versatile"
 ```
 
-## Encrypted Files
+## Encrypted files (`_rjj/`)
 
-Everything under `_rjj/` is encrypted in Git via [git-crypt](https://github.com/AGWA/git-crypt). Without the team key, those paths are opaque binary blobs in history and in clones.
-
-**GitHub visibility:** git-crypt protects **confidentiality** (who can read the *contents*). It does **not** make files visible to “only one GitHub user.” Anyone who can **clone** the repository can still **fetch** the ciphertext for `_rjj/`. To restrict who can access the repo at all, use a **private** GitHub repository and grant access only to the accounts that should clone it (e.g. your user, or a small collaborator list). Combine **private repo** + **git-crypt** if you want both access control and defense-in-depth for `_rjj/`.
-
-**To decrypt (authorized contributors only):**
+This repository is **public**. The `_rjj/` tree holds **private development notes** (internal context, deploy scratch, logs). Paths under `_rjj/` are tracked with [git-crypt](https://github.com/AGWA/git-crypt): clones see file names and ciphertext only. Plaintext is available after unlock with the team key.
 
 ```bash
 # Install git-crypt
@@ -173,11 +167,9 @@ brew install git-crypt          # macOS
 scoop install git-crypt         # Windows
 sudo apt install git-crypt      # Linux
 
-# Unlock after cloning
+# Unlock after cloning (key shared out-of-band with the team)
 git-crypt unlock /path/to/hyverk-git-crypt-key
 ```
-
-The key file is distributed privately to authorized team members.
 
 ## License
 
