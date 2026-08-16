@@ -1,0 +1,78 @@
+version: 1
+id: hyverk-cluster
+type: dev
+name: "Hyverk"
+description: "Distributed network for training and serving open-source coding models."
+
+transport:
+  workflow: websocket
+  endpoint: wss://hub.meshkore.com/ws
+  fallback: https://hub.meshkore.com
+
+bootstrap:
+  hub: https://hub.meshkore.com
+  install: https://meshkore.com/cluster/install
+  operate: https://meshkore.com/cluster/operate
+  standard: https://meshkore.com/standard
+  spec: https://meshkore.com/standard/spec
+
+git:
+  repo: https://github.com/capitaharlock/hyverk-distributed-llm.git
+  branch: main
+  auto_pull: true
+  auto_commit: false
+
+profile:
+  capabilities: [distributed-inference, lora-training, rust, python, metal, cuda]
+  visible_in_directory: true
+
+admission:
+  mode: invite
+  approval: manual
+  github_users: []
+  admission_token_lifetime: 3600
+  max_pending_requests: 50
+
+# Legacy MeshKore hub channel (v1 join flow via scripts/meshkore-join.sh).
+# Invite URL is NOT committed — use MESHKORE_INVITE or .meshkore.local.
+legacy_hub:
+  channel_id: f12223e4-0690-46fd-b9eb-a074c5cc795f
+  viewer: https://meshkore.com/cluster/f12223e4-0690-46fd-b9eb-a074c5cc795f
+
+members: []
+
+modules:
+  - id: coordinator
+    name: "Coordinator"
+    kind: code
+    path: server/coordinator/
+    description: "HTTP API, WebSocket orchestration, cluster generations, model serving."
+  - id: client
+    name: "Client"
+    kind: code
+    path: client/
+    description: "hyverk-node and related clients that contribute GPU/CPU compute."
+  - id: inference
+    name: "Inference"
+    kind: code
+    path: inference/
+    description: "Python layer-parallel forward pass and local cluster helpers."
+  - id: training
+    name: "Training"
+    kind: code
+    path: training/
+    description: "Python LoRA training and adapter merge runtime."
+  - id: shared
+    name: "Shared"
+    kind: code
+    path: shared/
+    description: "Shared Rust crates: config, proto, comms, training, synthesis."
+  - id: scripts
+    name: "Scripts"
+    kind: code
+    path: scripts/
+    description: "Local cluster runners, smoke tests, MeshKore helpers."
+  - id: general
+    name: "General"
+    kind: area
+    description: "Project-wide work not owned by another module."

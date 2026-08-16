@@ -13,12 +13,29 @@ SCAN = 500
 
 
 def _cluster_channel_id() -> str:
-    if not MESHKORE.exists():
-        return ""
-    try:
-        return (json.loads(MESHKORE.read_text()).get("cluster") or {}).get("channel_id") or ""
-    except (OSError, json.JSONDecodeError):
-        return ""
+    """Prefer MeshKore Standard cluster.yaml; fall back to legacy JSON file."""
+    yaml_path = MESHKORE / "public" / "cluster.yaml"
+    if yaml_path.is_file():
+        try:
+            text = yaml_path.read_text(encoding="utf-8", errors="replace")
+            in_legacy = False
+            for line in text.splitlines():
+                if line.startswith("legacy_hub:"):
+                    in_legacy = True
+                    continue
+                if in_legacy:
+                    if line and not line.startswith(" ") and not line.startswith("\t"):
+                        break
+                    if "channel_id:" in line:
+                        return line.split(":", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            pass
+    if MESHKORE.is_file():
+        try:
+            return (json.loads(MESHKORE.read_text()).get("cluster") or {}).get("channel_id") or ""
+        except (OSError, json.JSONDecodeError):
+            return ""
+    return ""
 
 
 def _is_priority_line(line: str, channel_id: str) -> bool:

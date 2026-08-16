@@ -10,7 +10,7 @@ This directory is all CPU / MPS / CUDA Python. The coordinator (Rust, in
 directly — it speaks to the Rust worker over WebSocket, which then POSTs
 to `http://127.0.0.1:{port}` here.
 
-Audit context: `_rjj/log/AUDIT-distributed-inference.md`.
+Context: `.meshkore/docs/architecture/distributed-inference.md`.
 
 ## Modes
 

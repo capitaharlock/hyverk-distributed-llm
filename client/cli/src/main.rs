@@ -1,4 +1,4 @@
-// @llm-context: _rjj/stack.md
+// @llm-context: .meshkore/docs/architecture/overview.md
 // @llm-critical: This is the unified entry point. Runs coordinator, node, or both based on config/CLI.
 
 use clap::{Parser, Subcommand};

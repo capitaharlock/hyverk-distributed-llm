@@ -2,9 +2,9 @@
 
 Distributed network for training and serving open-source coding models. Contributors donate compute (CPU/GPU) to collectively fine-tune and serve a shared LLM.
 
-## Architecture
+This repository is a **demo / source** tree. There is no required hosted coordinator: run locally, or deploy the stack on any host you choose.
 
-This is a **demo / source repository**. There is no hosted public coordinator to point at by default. Run a local cluster (see below), or deploy the coordinator wherever you prefer.
+## Architecture
 
 ```
 Contributors (Mac/Windows/Linux)     Coordinator (your host)
@@ -20,9 +20,9 @@ Contributors (Mac/Windows/Linux)     Coordinator (your host)
 └──────────────┘
 ```
 
-**Coordinator** — Central hub you run yourself (LAN or any cloud). Manages nodes, distributes training shards, routes inference, serves the dashboard.
+**Coordinator** — Hub you run yourself (LAN or cloud). Manages nodes, training shards, inference routing, and the dashboard.
 
-**Clients** — Run on contributor machines. Connect to the coordinator, contribute compute for training, synthesis, or inference depending on hardware.
+**Clients** — Run on contributor machines. Connect to the coordinator and contribute compute for training, synthesis, or inference.
 
 ## Model
 
@@ -76,34 +76,34 @@ See `scripts/LOCAL_CLUSTER.md`. Optional: `HYVERK_API_KEY` gates `POST /api/v1/w
 
 ### Hyverk-node (WS client for distributed inference / training)
 
-The **`hyverk-node`** binary connects to the coordinator over **WebSocket** and participates in GPU layer work when `hardware_info` advertises Metal/CUDA. Python helpers (`inference/node_forward.py`, etc.) need **`pip install -r inference/requirements.txt`** (includes `certifi` for HTTPS downloads from the coordinator).
-
 ```bash
 cargo build --release -p hyverk-node
 HYVERK_CONFIG=./config.toml ./target/release/hyverk-node
 ```
 
-Use a **gitignored** `config.toml` with `coordinator_url`, `node.name`, and `hardware_info` (see **Config** below). The coordinator must expose model shards under `/api/v1/model/*` when this node should download weights.
+Use a **gitignored** `config.toml` with `coordinator_url`, `node.name`, and `hardware_info` (see **Config** below).
 
-### MeshKore (dev mesh — Mac M4 lead + `hyverk-lead` messages)
+## MeshKore Standard
 
-This is **separate** from the Hyverk coordinator: same repo, **`.meshkore`** (public cluster metadata) + **`.meshkore.local`** (invite URL, Bearer token — never commit). Join once, then poll inbox or run the listener.
+This repo adopts the [MeshKore Standard](https://meshkore.com/standard) for agentic collaboration:
+
+- Public cluster identity: `.meshkore/public/cluster.yaml`
+- Docs / tasks: `.meshkore/docs/`, `.meshkore/modules/`
+- Secrets: `.meshkore/credentials/` and `.meshkore.local` (**never commit**)
 
 ```bash
 MESHKORE_INVITE='https://hub.meshkore.com/agents/invites/<nonce>/join' \
   MESHKORE_HUB_URL=https://meshkore-relay.fly.dev \
   bash scripts/meshkore-join.sh
-# If the lead DMs a fixed agent_id, match it:
-# MESHKORE_AGENT_ID=hyverk-cursor-architect-435d95 bash scripts/meshkore-join.sh
 python3 scripts/meshkore-dump-inbox.py
-# optional: python3 scripts/meshkore-listener.py
 ```
 
-Cached hub onboarding for core developers (after git-crypt unlock): **`_rjj/context/meshkore/AGENT-DOCS.relay.md`**. Cluster viewer link is in **`.meshkore`** → `cluster.viewer`.
+Ask a lead for an invite URL. Spec for agents: https://api.meshkore.com/v1/standard.md
 
 ## Project Structure
 
 ```
+.meshkore/         MeshKore Standard (docs, modules, public cluster.yaml)
 server/
   coordinator/     Orchestrator: HTTP API, WebSocket, gRPC, dashboard
   rag/             Knowledge base (BM25 + SQLite)
@@ -125,6 +125,7 @@ shared/
 inference/         Python: layer-parallel forward pass (runtime)
 training/          Python: LoRA training + adapter merge (runtime)
 proto/             .proto source files
+scripts/           Local cluster + MeshKore helpers
 ```
 
 ## API
@@ -147,7 +148,7 @@ mode = "node"
 
 [node]
 name = "my-machine"
-coordinator_url = "http://COORDINATOR_HOST:17000"
+coordinator_url = "http://127.0.0.1:17000"
 models_dir = "~/.hyverk/models"
 max_concurrent_tasks = 2
 hardware_info = "Apple M4 Max, Metal GPU"
@@ -159,22 +160,6 @@ enabled = true
 name = "groq"
 api_key = "gsk_..."
 model = "llama-3.3-70b-versatile"
-```
-
-## Encrypted files (`_rjj/`)
-
-This repository is **public**. `_rjj/` is **private lead-developer context** (notes, deploy scratch, internal logs; it may hold credentials or other secrets). It stays **encrypted** with [git-crypt](https://github.com/AGWA/git-crypt) and is **not** meant to be decrypted for the public. Without the team key, treat those paths as opaque.
-
-Authorized core developers unlock locally with the shared key:
-
-```bash
-# Install git-crypt
-brew install git-crypt          # macOS
-scoop install git-crypt         # Windows
-sudo apt install git-crypt      # Linux
-
-# Unlock after cloning (key shared out-of-band with core developers only)
-git-crypt unlock /path/to/hyverk-git-crypt-key
 ```
 
 ## License

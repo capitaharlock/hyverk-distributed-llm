@@ -1,4 +1,4 @@
-// @llm-context: _rjj/context/modules/synthesis/overview.md
+// @llm-context: .meshkore/modules/general/README.md
 // Phase 2: Distributed Synthesis Engine
 // Each node calls free LLM APIs to generate (instruction, code) training pairs.
 // With 1M nodes × 14.400 Groq calls/day = 14.4B examples/day.

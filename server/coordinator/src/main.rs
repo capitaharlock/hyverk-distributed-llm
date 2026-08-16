@@ -1,4 +1,4 @@
-// @llm-context: _rjj/links.md
+// @llm-context: .meshkore/docs/architecture/overview.md
 
 use hyverk_coordinator::run_coordinator;
 use hyverk_core::config::{load_config, HyverkConfig};

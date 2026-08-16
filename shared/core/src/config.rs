@@ -1,4 +1,4 @@
-// @llm-context: _rjj/context/modules/core/overview.md
+// @llm-context: .meshkore/docs/architecture/overview.md
 // @llm-depends: hyverk-coordinator/src/main.rs, hyverk-node/src/main.rs
 
 use serde::Deserialize;

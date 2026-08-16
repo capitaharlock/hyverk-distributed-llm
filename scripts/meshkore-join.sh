@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Join MeshKore via cluster invite and write .meshkore.local (gitignored).
-# Reads hub/channel from .meshkore. Invite URL is NOT in the public repo:
+# Channel/hub come from .meshkore/public/cluster.yaml.
+# Invite URL is NOT in the public repo:
 #   MESHKORE_INVITE='https://hub.../agents/invites/<nonce>/join' bash scripts/meshkore-join.sh
 # or put "invite" in gitignored .meshkore.local before joining.
 #
@@ -11,8 +12,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Stable default per machine (no "cursor" / "architect" in the id — avoids confusing the cluster UI).
-# Override if taken: MESHKORE_AGENT_ID=you@machine bash scripts/meshkore-join.sh
 _HOST="$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-20)"
 AGENT_ID="${MESHKORE_AGENT_ID:-hyverk-contributor-${_HOST:-dev}}"
 HUB_URL="${MESHKORE_HUB_URL:-https://meshkore-relay.fly.dev}"
@@ -25,7 +24,35 @@ eval "$(python3 - <<'PY'
 import json, os, re, sys
 from pathlib import Path
 
-m = json.loads(Path(".meshkore").read_text())
+try:
+    import yaml  # type: ignore
+except ImportError:
+    yaml = None
+
+def load_cluster():
+    p = Path(".meshkore/public/cluster.yaml")
+    if not p.is_file():
+        sys.stderr.write("ERROR: missing .meshkore/public/cluster.yaml\n")
+        sys.exit(1)
+    text = p.read_text()
+    if yaml is not None:
+        return yaml.safe_load(text)
+    # Minimal fallback parser for the fields we need (no PyYAML required).
+    data = {"legacy_hub": {}, "bootstrap": {}}
+    cur = None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if re.match(r"^[a-z_]+:\s*$", line):
+            cur = line.split(":", 1)[0].strip()
+            data.setdefault(cur, {})
+            continue
+        if cur in ("legacy_hub", "bootstrap") and ":" in line and line.startswith("  "):
+            k, v = line.split(":", 1)
+            data[cur][k.strip()] = v.strip().strip('"').strip("'")
+    return data
+
+m = load_cluster()
 local = {}
 lp = Path(".meshkore.local")
 if lp.is_file():
@@ -37,20 +64,20 @@ if lp.is_file():
 invite = (os.environ.get("MESHKORE_INVITE") or "").strip()
 if not invite:
     invite = (local.get("invite") or "").strip()
-if not invite:
-    invite = ((m.get("cluster") or {}).get("invite") or "").strip()
 
 mo = re.search(r"/invites/([0-9a-f]+)/join", invite)
 if not mo:
     sys.stderr.write(
         "ERROR: no invite URL. Set MESHKORE_INVITE or put \"invite\" in .meshkore.local\n"
-        "  (invite URLs are not stored in the public .meshkore file)\n"
+        "  (invite URLs are not stored in the public repo)\n"
     )
     sys.exit(1)
 nonce = mo.group(1)
-canonical = (m.get("hub") or {}).get("url", "https://hub.meshkore.com").rstrip("/")
-channel = (m.get("cluster") or {}).get("channel_id") or ""
-# shell-safe single-quoted strings
+legacy = m.get("legacy_hub") or {}
+bootstrap = m.get("bootstrap") or {}
+canonical = (bootstrap.get("hub") or "https://hub.meshkore.com").rstrip("/")
+channel = legacy.get("channel_id") or ""
+
 def sq(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
 print(f"export INVITE_NONCE={sq(nonce)}")
@@ -105,12 +132,6 @@ if not token or not api_key or not agent_id:
     print("ERROR: response missing token/api_key/agent_id:", data, file=sys.stderr)
     sys.exit(1)
 
-meshv = 1
-try:
-    meshv = json.loads((root / ".meshkore").read_text()).get("meshkore_version", 1)
-except OSError:
-    pass
-
 local_path = root / ".meshkore.local"
 blob = {}
 if local_path.is_file():
@@ -119,7 +140,7 @@ if local_path.is_file():
     except json.JSONDecodeError:
         blob = {}
 blob.update({
-    "meshkore_version": meshv,
+    "meshkore_version": 1,
     "hub_url": hub_url,
     "canonical_hub_url": canonical,
     "channel_id": channel_id,

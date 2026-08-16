@@ -1,4 +1,4 @@
-// @llm-context: _rjj/context/modules/synthesis/overview.md
+// @llm-context: .meshkore/modules/general/README.md
 // Phase 3: Execution Verification
 // Extracts Rust code from LLM responses, compiles it in a temp Cargo project,
 // runs tests if present, returns pass/fail + compiler output.

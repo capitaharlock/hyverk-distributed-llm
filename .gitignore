@@ -7,8 +7,6 @@ client/desktop/node_modules/
 electron/dist/
 electron/out/
 
-# Private context — encrypted via git-crypt (visible only with key)
-# _rjj/ is tracked but encrypted
 
 # Deploy configs (Fly.io, Docker, entrypoints, platform scripts)
 /deploy/
@@ -46,8 +44,6 @@ Thumbs.db
 *.bin
 *.pt
 
-# MeshKore — private overrides (hub, join, API keys); keep `.meshkore` minimal in git
-.meshkore.local
 
 # Environment / Secrets
 .env
@@ -76,3 +72,22 @@ training/tokenizer.json
 # Temp
 *.tmp
 *.log
+
+# MeshKore Standard (§2.2) — commit brain; keep secrets/runtime local
+.meshkore/.runtime/
+.meshkore/credentials/
+.meshkore/agents/
+.meshkore/timeline/
+.meshkore/log/
+.meshkore/queues/
+.meshkore/uploads/
+.meshkore/snapshots/
+.meshkore/_archive/
+.meshkore/state.json
+.meshkore/roadmap/state.json
+.meshkore/roadmap/state.js
+.meshkore/scripts/
+.meshkore.local
+.meshkore-incoming.jsonl
+.meshkore-listener.state.json
+CLAUDE.md

@@ -1,4 +1,4 @@
-// @llm-context: _rjj/stack.md
+// @llm-context: .meshkore/docs/architecture/overview.md
 // @llm-depends: grpc_server.rs, router.rs
 
 use hyverk_proto::NodeCapabilities;

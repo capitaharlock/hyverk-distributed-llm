@@ -1,4 +1,4 @@
-// @llm-context: _rjj/links.md
+// @llm-context: .meshkore/docs/architecture/overview.md
 // @llm-depends: task_store.rs, registry.rs, dataset_store.rs, metrics.rs
 
 use crate::dataset_store::{DatasetExample, DatasetStore};

@@ -1,4 +1,4 @@
-// @llm-context: _rjj/context/modules/training/overview.md
+// @llm-context: .meshkore/modules/training/README.md
 // Phase 4: Distributed LoRA Fine-tuning
 //
 // Architecture:

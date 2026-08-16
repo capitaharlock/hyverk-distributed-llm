@@ -1,4 +1,4 @@
-// @llm-context: _rjj/stack.md
+// @llm-context: .meshkore/docs/architecture/overview.md
 
 use hyverk_core::config::{load_config, HyverkConfig};
 use hyverk_node::run_node;

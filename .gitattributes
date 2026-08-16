@@ -1,4 +1,1 @@
-# All project context under _rjj/ is encrypted in Git (plaintext only after `git-crypt unlock`).
-_rjj/** filter=git-crypt diff=git-crypt
-.env filter=git-crypt diff=git-crypt
-.env.* filter=git-crypt diff=git-crypt
+# (no git-crypt) — secrets live in gitignored .meshkore/credentials/ and .meshkore.local
