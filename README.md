@@ -34,16 +34,16 @@ Contributors (Mac/Windows/Linux)     Coordinator (Fly.io)
 ### macOS / Linux
 
 ```bash
-git clone https://github.com/capitaharlock/hyverk.com.git
-cd hyverk.com
+git clone https://github.com/capitaharlock/hyverk-distributed-llm.git
+cd hyverk-distributed-llm
 bash deploy/setup.sh
 ```
 
 ### Windows
 
 ```powershell
-git clone https://github.com/capitaharlock/hyverk.com.git
-cd hyverk.com
+git clone https://github.com/capitaharlock/hyverk-distributed-llm.git
+cd hyverk-distributed-llm
 powershell -ExecutionPolicy Bypass -File deploy\setup.ps1
 ```
 
